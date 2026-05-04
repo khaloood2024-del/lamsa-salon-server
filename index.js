@@ -1,5 +1,6 @@
 import express from "express";
 import twilio from "twilio";
+import pg from "pg";
 
 const app = express();
 app.use(express.urlencoded({ extended: false }));
@@ -7,55 +8,88 @@ app.use(express.json());
 
 const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
-const sessions = {};
-const bookings  = [];
+// ─── قاعدة البيانات ───────────────────────────────────────────────
+const pool = new pg.Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+});
 
-function buildPrompt() {
+// إنشاء الجداول عند التشغيل
+async function initDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS bookings (
+      id BIGINT PRIMARY KEY,
+      phone TEXT,
+      name TEXT,
+      service TEXT,
+      date TEXT,
+      time TEXT,
+      price TEXT,
+      status TEXT DEFAULT 'confirmed',
+      source TEXT DEFAULT 'whatsapp',
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS sessions (
+      phone TEXT PRIMARY KEY,
+      messages JSONB DEFAULT '[]',
+      updated_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+  console.log("✅ DB جاهز");
+}
+
+// ─── Session helpers ──────────────────────────────────────────────
+async function getSession(phone) {
+  const res = await pool.query("SELECT messages FROM sessions WHERE phone=$1", [phone]);
+  return res.rows[0]?.messages || [];
+}
+
+async function saveSession(phone, messages) {
+  await pool.query(`
+    INSERT INTO sessions (phone, messages, updated_at)
+    VALUES ($1, $2, NOW())
+    ON CONFLICT (phone) DO UPDATE SET messages=$2, updated_at=NOW()
+  `, [phone, JSON.stringify(messages)]);
+}
+
+// ─── System Prompt ────────────────────────────────────────────────
+async function buildPrompt() {
   const now          = new Date();
   const arabicDays   = ["الأحد","الاثنين","الثلاثاء","الأربعاء","الخميس","الجمعة","السبت"];
   const arabicMonths = ["يناير","فبراير","مارس","أبريل","مايو","يونيو","يوليو","أغسطس","سبتمبر","أكتوبر","نوفمبر","ديسمبر"];
   const fmt = d => arabicDays[d.getDay()]+" "+d.getDate()+" "+arabicMonths[d.getMonth()]+" "+d.getFullYear();
   const today    = new Date(now); today.setHours(0,0,0,0);
   const tomorrow = new Date(today); tomorrow.setDate(today.getDate()+1);
-  const todayBooked    = bookings.filter(b=>b.date==="اليوم").map(b=>b.time).join("، ") || "لا يوجد";
-  const tomorrowBooked = bookings.filter(b=>b.date==="بكره").map(b=>b.time).join("، ")  || "لا يوجد";
 
-  return `أنتِ موظفة استقبال في صالون نسائي اسمه "لمسة". تتكلمين بالسعودي البيض الطبيعي مع العميلات — مثل بنت سعودية أصيلة.
+  const res = await pool.query("SELECT time FROM bookings WHERE date='اليوم' AND status='confirmed'");
+  const todayBooked = res.rows.map(r=>r.time).join("، ") || "لا يوجد";
+  const res2 = await pool.query("SELECT time FROM bookings WHERE date='بكره' AND status='confirmed'");
+  const tomorrowBooked = res2.rows.map(r=>r.time).join("، ") || "لا يوجد";
+
+  return `أنتِ موظفة استقبال في صالون نسائي اسمه "لمسة". تتكلمين بالسعودي البيض الطبيعي مع العميلات.
 
 أمثلة صح:
 - "هلا! كيف أخدمك؟"
 - "أي وقت يناسبك؟"
 - "تمام، اليوم أو بكره؟"
-- "دوامنا 9ص-10م السبت للخميس، الجمعة 2م-10م 👍"
-- "عندنا: باديكير 80ر، تلوين 250ر، قص 150ر، أوزون 200ر، مساج 180ر، تنظيف بشرة 220ر، عروس 800ر"
+- "دوامنا 9ص-10م السبت للخميس، الجمعة 2م-10م"
 - "زين، باقي اسمك بس وأحجزلك 😊"
-- "تم الحجز إن شاء الله! نشوفك الساعة 3 👍"
-
-أمثلة غلط (لا تقولين هذا):
-- "وعليكم السلام، هلا فياكِ في لمسة، كيف أقدر أخدمك اليوم؟" (طويل)
-- "يسعدني خدمتك" (فصحى)
-- "حضرتك" (مصري)
+- "تم الحجز إن شاء الله! نشوفك الساعة 3"
 
 القواعد:
 - خاطبي العميلة بصيغة المؤنث: تبين، عندك، يناسبك
 - جملة أو جملتين MAX
-- لا تكررين نفس المعلومة
-- لا تبدأين كل جملة بـ "زين"
-- إيموجي واحد بالرد كحد أقصى، وأحياناً بدون إيموجي
-- إذا العميلة قالت "صبغة" افهمين إنها تقصد تلوين الشعر
-- إذا قالت "قص" افهمين قص وتصفيف
-- إذا قالت "فيشل" أو "فيشيل" افهمين تنظيف بشرة
-- إذا قالت "مساج" افهمين مساج استرخاء
-- تكلمي بشكل طبيعي مثل موظفة استقبال حقيقية — مو روبوت
+- إيموجي واحد بالرد كحد أقصى
+- إذا قالت "صبغة" = تلوين شعر | "فيشل" = تنظيف بشرة | "قص" = قص وتصفيف
 
 التاريخ: اليوم ${fmt(today)} | بكره ${fmt(tomorrow)}
 الدوام: السبت-الخميس 9ص-10م | الجمعة 2م-10م
 المواعيد المحجوزة — اليوم: ${todayBooked} | بكره: ${tomorrowBooked}
 
-الخدمات وأسماؤها الشعبية: باديكير/بيديكير 80ر | صبغة/تلوين شعر 250ر | قص/تقصير شعر 150ر | أوزون 200ر | مساج/مساج استرخاء 180ر | فيشل/تنظيف وجه 220ر | باقة عروس 800ر
+الخدمات: باديكير 80ر | تلوين شعر 250ر | قص وتصفيف 150ر | أوزون 200ر | مساج 180ر | تنظيف بشرة 220ر | عروس كاملة 800ر
 
 ما تأكدين الحجز إلا بعد: الخدمة + التاريخ + الوقت + الاسم
-عند تأكيد الحجز أضيفي: [BOOKING_CONFIRMED: الاسم | الخدمة | التاريخ | الوقت | السعر]
+عند تأكيد الحجز: [BOOKING_CONFIRMED: الاسم | الخدمة | التاريخ | الوقت | السعر]
 إذا طلبت إلغاء: [BOOKING_CANCELLED: التفاصيل]
 إذا الموضوع معقد: [TRANSFER_TO_HUMAN]`;
 }
@@ -84,66 +118,62 @@ async function callAI(messages) {
   const apiKey   = (process.env.AI_API_KEY  || "").trim();
   const model    = (process.env.AI_MODEL    || "openai/gpt-4.1-mini").trim();
 
-  console.log(`[AI] provider=${provider} model=${model}`);
+  const url = provider === "openrouter"
+    ? "https://openrouter.ai/api/v1/chat/completions"
+    : provider === "anthropic"
+    ? null
+    : "https://api.openai.com/v1/chat/completions";
 
   if (provider === "anthropic") {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: { "Content-Type":"application/json", "x-api-key":apiKey, "anthropic-version":"2023-06-01" },
-      body: JSON.stringify({ model, max_tokens:200, system:buildPrompt(), messages }),
+      method:"POST",
+      headers:{"Content-Type":"application/json","x-api-key":apiKey,"anthropic-version":"2023-06-01"},
+      body: JSON.stringify({ model, max_tokens:200, system: await buildPrompt(), messages }),
     });
     const data = await res.json();
     return data.content?.[0]?.text || "عذراً، صار خطأ.";
   }
 
-  const url = provider === "openrouter"
-    ? "https://openrouter.ai/api/v1/chat/completions"
-    : "https://api.openai.com/v1/chat/completions";
-
   const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type":  "application/json",
-      "Authorization": `Bearer ${apiKey}`,
-      "HTTP-Referer":  "https://lamsa-salon.app",
-      "X-Title":       "Lamsa Salon",
+    method:"POST",
+    headers:{
+      "Content-Type":"application/json",
+      "Authorization":`Bearer ${apiKey}`,
+      "HTTP-Referer":"https://lamsa-salon.app",
+      "X-Title":"Lamsa Salon",
     },
     body: JSON.stringify({
-      model,
-      max_tokens: 200,
-      messages: [
-        { role:"system", content:buildPrompt() },
-        ...messages,
-      ],
+      model, max_tokens:200,
+      messages:[{ role:"system", content: await buildPrompt() }, ...messages],
     }),
   });
-
   const data = await res.json();
-  console.log(`[${provider}] status:`, res.status);
-  if (data.error) {
-    console.error(`[${provider}] ERROR:`, JSON.stringify(data.error));
-    return "عذراً، صار خطأ.";
-  }
+  if (data.error) { console.error("AI ERROR:", data.error); return "عذراً، صار خطأ."; }
   return data.choices?.[0]?.message?.content || "عذراً، صار خطأ.";
 }
 
+// ─── Webhook ──────────────────────────────────────────────────────
 app.post("/webhook", async (req, res) => {
   const from = req.body.From;
   const body = req.body.Body?.trim();
-  console.log(`[MSG] from=${from} body="${body}"`);
   if (!from || !body) return res.sendStatus(200);
-
-  if (!sessions[from]) sessions[from] = [];
-  sessions[from].push({ role:"user", content:body });
-  if (sessions[from].length > 20) sessions[from] = sessions[from].slice(-20);
+  console.log(`[MSG] ${from}: "${body}"`);
 
   try {
-    const rawText          = await callAI(sessions[from]);
+    let messages = await getSession(from);
+    messages.push({ role:"user", content:body });
+    if (messages.length > 20) messages = messages.slice(-20);
+
+    const rawText          = await callAI(messages);
     const { clean, event } = parseResponse(rawText);
-    sessions[from].push({ role:"assistant", content:rawText });
+    messages.push({ role:"assistant", content:rawText });
+    await saveSession(from, messages);
 
     if (event?.type === "booking") {
-      bookings.push({ id:Date.now(), phone:from, ...event, status:"confirmed", source:"whatsapp" });
+      await pool.query(
+        "INSERT INTO bookings (id,phone,name,service,date,time,price,status,source) VALUES ($1,$2,$3,$4,$5,$6,$7,'confirmed','whatsapp')",
+        [Date.now(), from, event.name, event.service, event.date, event.time, event.price]
+      );
       console.log("✅ حجز:", event.name, event.service, event.time);
     }
 
@@ -154,19 +184,33 @@ app.post("/webhook", async (req, res) => {
   } catch (err) {
     console.error("[ERR]", err.message);
     const twiml = new twilio.twiml.MessagingResponse();
-    twiml.message("عذراً، صار خطأ. جرب مرة ثانية.");
+    twiml.message("عذراً، صار خطأ. جربي مرة ثانية.");
     res.type("text/xml").send(twiml.toString());
   }
 });
 
-app.get("/api/bookings", (_req, res) => res.json(bookings));
+// ─── API للداشبورد ────────────────────────────────────────────────
+app.get("/api/bookings", async (_req, res) => {
+  const result = await pool.query("SELECT * FROM bookings ORDER BY created_at DESC");
+  res.json(result.rows);
+});
+
+app.patch("/api/bookings/:id/cancel", async (req, res) => {
+  await pool.query("UPDATE bookings SET status='cancelled' WHERE id=$1", [req.params.id]);
+  res.json({ success: true });
+});
+
 app.get("/", (_req, res) => res.json({
-  status: "✅ شغال",
+  status:   "✅ شغال",
   provider: process.env.AI_PROVIDER,
   model:    process.env.AI_MODEL,
   keySet:   !!process.env.AI_API_KEY,
+  db:       !!process.env.DATABASE_URL,
 }));
 
-app.listen(process.env.PORT || 3000, () =>
-  console.log("🚀 Server on port", process.env.PORT || 3000, "| AI:", process.env.AI_PROVIDER)
-);
+// ─── Start ────────────────────────────────────────────────────────
+initDB().then(() => {
+  app.listen(process.env.PORT || 3000, () =>
+    console.log("🚀 Server on port", process.env.PORT || 3000, "| AI:", process.env.AI_PROVIDER)
+  );
+});
