@@ -21,9 +21,7 @@ const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_A
 const sseClients = new Set();
 
 function notifyClients(data) {
-  const msg = `data: ${JSON.stringify(data)}
-
-`;
+  const msg = "data: " + JSON.stringify(data) + "\n\n";
   sseClients.forEach(client => {
     try { client.write(msg); } catch { sseClients.delete(client); }
   });
@@ -224,9 +222,7 @@ app.get("/api/events", (req, res) => {
 
   // أرسل ping كل 30 ثانية للإبقاء على الاتصال
   const ping = setInterval(() => {
-    try { res.write(": ping
-
-"); } catch { clearInterval(ping); }
+    try { res.write(": ping" + "\n\n"); } catch { clearInterval(ping); }
   }, 30000);
 
   sseClients.add(res);
