@@ -46,8 +46,12 @@ async function initDB() {
       price TEXT,
       status TEXT DEFAULT 'confirmed',
       source TEXT DEFAULT 'whatsapp',
+      reminded BOOLEAN DEFAULT false,
+      reviewed BOOLEAN DEFAULT false,
       created_at TIMESTAMP DEFAULT NOW()
     );
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reminded BOOLEAN DEFAULT false;
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reviewed BOOLEAN DEFAULT false;
     CREATE TABLE IF NOT EXISTS sessions (
       phone TEXT PRIMARY KEY,
       messages JSONB DEFAULT '[]',
@@ -245,6 +249,83 @@ app.patch("/api/bookings/:id/cancel", async (req, res) => {
   await pool.query("UPDATE bookings SET status='cancelled' WHERE id=$1", [req.params.id]);
   res.json({ success: true });
 });
+
+// ─── إضافة حجز يدوي من الداشبورد ────────────────────────────────
+app.post("/api/bookings/manual", async (req, res) => {
+  const { name, service, date, time, price, phone, id } = req.body;
+  try {
+    await pool.query(
+      "INSERT INTO bookings (id,phone,name,service,date,time,price,status,source) VALUES ($1,$2,$3,$4,$5,$6,$7,'confirmed','manual')",
+      [id || Date.now(), phone || "", name, service, date, time, price]
+    );
+    notifyClients({ type:"new_booking", name, service, time });
+    console.log("✅ حجز يدوي:", name, service, time);
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Manual booking error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── تذكير تلقائي ────────────────────────────────────────────────
+async function sendReminders() {
+  try {
+    const res = await pool.query(
+      "SELECT * FROM bookings WHERE status='confirmed' AND reminded=false"
+    );
+    const now = new Date();
+    for (const b of res.rows) {
+      if (!b.phone || b.phone === "") continue;
+      // أرسل تذكير لو الموعد بكره
+      if (b.date === "بكره") {
+        const msg = "هلا " + b.name + "! 😊 نذكرك بموعدك بكره لخدمة " + b.service + " الساعة " + b.time + " في صالون لمسة. نشوفك إن شاء الله!";
+        try {
+          await twilioClient.messages.create({
+            from: process.env.TWILIO_WHATSAPP_NUMBER,
+            to: b.phone.startsWith("whatsapp:") ? b.phone : "whatsapp:" + b.phone,
+            body: msg,
+          });
+          await pool.query("UPDATE bookings SET reminded=true WHERE id=$1", [b.id]);
+          console.log("✅ تذكير أُرسل لـ:", b.name);
+        } catch (err) {
+          console.error("Reminder error:", err.message);
+        }
+      }
+    }
+  } catch (err) {
+    console.error("Reminders error:", err.message);
+  }
+}
+
+// ─── تقييم بعد الخدمة ────────────────────────────────────────────
+async function sendReviews() {
+  try {
+    const res = await pool.query(
+      "SELECT * FROM bookings WHERE status='confirmed' AND reviewed=false AND date='اليوم'"
+    );
+    for (const b of res.rows) {
+      if (!b.phone || b.phone === "") continue;
+      const msg = "شكراً " + b.name + "! ✨ كيف كانت تجربتك معنا في لمسة؟ قيّمينا من 1 إلى 5 ⭐";
+      try {
+        await twilioClient.messages.create({
+          from: process.env.TWILIO_WHATSAPP_NUMBER,
+          to: b.phone.startsWith("whatsapp:") ? b.phone : "whatsapp:" + b.phone,
+          body: msg,
+        });
+        await pool.query("UPDATE bookings SET reviewed=true WHERE id=$1", [b.id]);
+        console.log("✅ طلب تقييم أُرسل لـ:", b.name);
+      } catch (err) {
+        console.error("Review error:", err.message);
+      }
+    }
+  } catch (err) {
+    console.error("Reviews error:", err.message);
+  }
+}
+
+// شغّل التذكير كل ساعة والتقييم كل 3 ساعات
+setInterval(sendReminders, 60 * 60 * 1000);
+setInterval(sendReviews, 3 * 60 * 60 * 1000);
 
 app.get("/", (_req, res) => res.json({
   status:   "✅ شغال",
