@@ -17,6 +17,18 @@ app.use((req, res, next) => {
 
 const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
+// ─── SSE Clients ─────────────────────────────────────────────────
+const sseClients = new Set();
+
+function notifyClients(data) {
+  const msg = `data: ${JSON.stringify(data)}
+
+`;
+  sseClients.forEach(client => {
+    try { client.write(msg); } catch { sseClients.delete(client); }
+  });
+}
+
 // ─── قاعدة البيانات ───────────────────────────────────────────────
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
@@ -181,11 +193,13 @@ app.post("/webhook", async (req, res) => {
     await saveSession(from, messages);
 
     if (event?.type === "booking") {
+      const bookingId = Date.now();
       await pool.query(
         "INSERT INTO bookings (id,phone,name,service,date,time,price,status,source) VALUES ($1,$2,$3,$4,$5,$6,$7,'confirmed','whatsapp')",
-        [Date.now(), from, event.name, event.service, event.date, event.time, event.price]
+        [bookingId, from, event.name, event.service, event.date, event.time, event.price]
       );
       console.log("✅ حجز:", event.name, event.service, event.time);
+      notifyClients({ type:"new_booking", name:event.name, service:event.service, time:event.time });
     }
 
     const twiml = new twilio.twiml.MessagingResponse();
@@ -198,6 +212,31 @@ app.post("/webhook", async (req, res) => {
     twiml.message("عذراً، صار خطأ. جربي مرة ثانية.");
     res.type("text/xml").send(twiml.toString());
   }
+});
+
+// ─── SSE Endpoint ────────────────────────────────────────────────
+app.get("/api/events", (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.flushHeaders();
+
+  // أرسل ping كل 30 ثانية للإبقاء على الاتصال
+  const ping = setInterval(() => {
+    try { res.write(": ping
+
+"); } catch { clearInterval(ping); }
+  }, 30000);
+
+  sseClients.add(res);
+  console.log(`[SSE] client connected, total: ${sseClients.size}`);
+
+  req.on("close", () => {
+    sseClients.delete(res);
+    clearInterval(ping);
+    console.log(`[SSE] client disconnected, total: ${sseClients.size}`);
+  });
 });
 
 // ─── API للداشبورد ────────────────────────────────────────────────
