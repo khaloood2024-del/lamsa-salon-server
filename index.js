@@ -57,6 +57,24 @@ async function initDB() {
       messages JSONB DEFAULT '[]',
       updated_at TIMESTAMP DEFAULT NOW()
     );
+    CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      username TEXT UNIQUE NOT NULL,
+      password TEXT NOT NULL,
+      role TEXT DEFAULT 'staff',
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+  // أنشئ حساب المدير الافتراضي لو ما عنده
+  await pool.query(`
+    INSERT INTO users (username, password, role)
+    VALUES ('مدير', 'admin2026', 'admin')
+    ON CONFLICT (username) DO NOTHING
+  `);
+  await pool.query(`
+    INSERT INTO users (username, password, role)
+    VALUES ('موظفة', 'lamsa2026', 'staff')
+    ON CONFLICT (username) DO NOTHING
   `);
   console.log("✅ DB جاهز");
 }
@@ -326,6 +344,83 @@ async function sendReviews() {
 // شغّل التذكير كل ساعة والتقييم كل 3 ساعات
 setInterval(sendReminders, 60 * 60 * 1000);
 setInterval(sendReviews, 3 * 60 * 60 * 1000);
+
+// ─── API المستخدمين ──────────────────────────────────────────────
+
+// تسجيل دخول
+app.post("/api/login", async (req, res) => {
+  const { username, password } = req.body;
+  try {
+    const result = await pool.query(
+      "SELECT id, username, role FROM users WHERE username=$1 AND password=$2",
+      [username, password]
+    );
+    if (result.rows.length === 0) {
+      return res.status(401).json({ error: "اسم المستخدم أو كلمة المرور غلط" });
+    }
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// جلب كل المستخدمين (للمدير فقط)
+app.get("/api/users", async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT id, username, role, created_at FROM users ORDER BY created_at"
+    );
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// إضافة مستخدم جديد
+app.post("/api/users", async (req, res) => {
+  const { username, password, role } = req.body;
+  if (!username || !password) return res.status(400).json({ error: "اسم المستخدم وكلمة المرور مطلوبين" });
+  try {
+    const result = await pool.query(
+      "INSERT INTO users (username, password, role) VALUES ($1, $2, $3) RETURNING id, username, role",
+      [username, password, role || "staff"]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    if (err.code === "23505") return res.status(400).json({ error: "اسم المستخدم موجود مسبقاً" });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// تعديل مستخدم
+app.patch("/api/users/:id", async (req, res) => {
+  const { username, password, role } = req.body;
+  try {
+    let query, params;
+    if (password) {
+      query = "UPDATE users SET username=$1, password=$2, role=$3 WHERE id=$4 RETURNING id, username, role";
+      params = [username, password, role, req.params.id];
+    } else {
+      query = "UPDATE users SET username=$1, role=$2 WHERE id=$3 RETURNING id, username, role";
+      params = [username, role, req.params.id];
+    }
+    const result = await pool.query(query, params);
+    res.json(result.rows[0]);
+  } catch (err) {
+    if (err.code === "23505") return res.status(400).json({ error: "اسم المستخدم موجود مسبقاً" });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// حذف مستخدم
+app.delete("/api/users/:id", async (req, res) => {
+  try {
+    await pool.query("DELETE FROM users WHERE id=$1", [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 app.get("/", (_req, res) => res.json({
   status:   "✅ شغال",
