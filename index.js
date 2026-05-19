@@ -51,6 +51,7 @@ async function initDB() {
       created_at TIMESTAMP DEFAULT NOW()
     );
     ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reminded BOOLEAN DEFAULT false;
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reminded_hour BOOLEAN DEFAULT false;
     ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reviewed BOOLEAN DEFAULT false;
     CREATE TABLE IF NOT EXISTS sessions (
       phone TEXT PRIMARY KEY,
@@ -62,6 +63,25 @@ async function initDB() {
       username TEXT UNIQUE NOT NULL,
       password TEXT NOT NULL,
       role TEXT DEFAULT 'staff',
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS services (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT,
+      price NUMERIC DEFAULT 0,
+      icon TEXT DEFAULT '⭐',
+      active BOOLEAN DEFAULT true,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS offers (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT,
+      price NUMERIC DEFAULT 0,
+      icon TEXT DEFAULT '🎁',
+      discount NUMERIC DEFAULT 0,
+      active BOOLEAN DEFAULT true,
       created_at TIMESTAMP DEFAULT NOW()
     );
   `);
@@ -107,40 +127,74 @@ async function buildPrompt() {
   const res2 = await pool.query("SELECT time FROM bookings WHERE date='بكره' AND status='confirmed'");
   const tomorrowBooked = res2.rows.map(r=>r.time).join("، ") || "لا يوجد";
 
-  return `أنتِ موظفة استقبال في صالون نسائي فاخر اسمه "لمسة". تتكلمين بلهجة سعودية بيضاء طبيعية.
+  const lang = process.env.BUSINESS_LANG || "ar";
+  const bizName = process.env.BUSINESS_NAME || "منشأتنا";
+  const bizType = process.env.BUSINESS_TYPE || "منشأة";
 
-أمثلة صح على أول رد:
-- "وعليكم السلام، أهلاً بك في صالون لمسة ✨ كيف أقدر أخدمك؟"
-- "هلا، أهلاً وسهلاً في لمسة! كيف أقدر أخدمك اليوم؟"
-- "وعليكم السلام! حياكِ في صالون لمسة، كيف أخدمك؟"
+  // جلب الخدمات والعروض من قاعدة البيانات
+  const svcRes = await pool.query("SELECT * FROM services WHERE active=true ORDER BY created_at");
+  const offRes = await pool.query("SELECT * FROM offers WHERE active=true ORDER BY created_at");
+  const servicesList = svcRes.rows.length > 0
+    ? svcRes.rows.map(s => s.icon + " " + s.name + " — " + s.price + " ر.س").join(" | ")
+    : process.env.BUSINESS_SERVICES || "لا توجد خدمات مضافة بعد";
+  const offersList = offRes.rows.length > 0
+    ? offRes.rows.map(o => o.icon + " " + o.name + (o.discount>0?" (خصم "+o.discount+"%)":"") + " — " + o.price + " ر.س").join(" | ")
+    : "لا توجد عروض حالياً";
 
-أمثلة صح على ردود عامة:
-- "أي وقت يناسبك؟"
-- "تمام، اليوم أو بكره؟"
-- "دوامنا 9ص-10م السبت للخميس، الجمعة 2م-10م"
-- "زين، باقي اسمك بس وأحجزلك 😊"
-- "تم الحجز إن شاء الله! نشوفك الساعة 3"
+  return `أنت موظف استقبال ذكي في ${bizType} اسمها "${bizName}".
 
-القواعد المهمة:
-- في أول رسالة: رحّبي بالعميلة في الصالون ولا تذكرين اسمها لأنك ما تعرفينه بعد
-- اسم العميلة تعرفينه فقط لما تذكره هي بنفسها في المحادثة
-- خاطبي العميلة بصيغة المؤنث: تبين، عندك، يناسبك
-- جملة أو جملتين MAX
-- إيموجي واحد بالرد كحد أقصى
-- إذا قالت "صبغة" = تلوين شعر | "فيشل" = تنظيف بشرة | "قص" = قص وتصفيف
+═══════════════════════════════════
+قاعدة اللغة (مهمة جداً):
+- إذا كتب العميل بالعربية → رد بالعربية فقط
+- إذا كتب بالإنجليزية → رد بالإنجليزية فقط
+- إذا خلط → استخدم اللغة الأكثر في رسالته
+═══════════════════════════════════
 
-التاريخ: اليوم ${fmt(today)} | بكره ${fmt(tomorrow)}
-الدوام: السبت-الخميس 9ص-10م | الجمعة 2م-10م
-المواعيد المحجوزة — اليوم: ${todayBooked} | بكره: ${tomorrowBooked}
+أول رسالة من العميل — الرد يكون هكذا بالضبط (بالعربي):
+"أهلاً بك في ${bizName}! 👋
 
-الخدمات: باديكير 80ر | تلوين شعر 250ر | قص وتصفيف 150ر | أوزون 200ر | مساج 180ر | تنظيف بشرة 220ر | عروس كاملة 800ر
+اختر من القائمة:
+1️⃣ حجز موعد
+2️⃣ الخدمات والأسعار
+3️⃣ العروض والتخفيضات
+4️⃣ أوقات الدوام
+5️⃣ التحدث مع موظف"
 
-ما تأكدين الحجز إلا بعد: الخدمة + التاريخ + الوقت + الاسم
-عند تأكيد الحجز — مثال الرد الصح:
-"تم الحجز إن شاء الله! نشوفك الثلاثاء 5 مايو الساعة 11 الظهر 😊 [BOOKING_CONFIRMED: هاجر | أوزون | الثلاثاء 5 مايو 2026 | 11:00 م | 200 ريال]"
-يعني لازم تضيفين [BOOKING_CONFIRMED: ...] في نفس الرسالة بعد كلامك مباشرة — هذا إلزامي ومو اختياري.
-إذا طلبت إلغاء أضيفي: [BOOKING_CANCELLED: التفاصيل]
-إذا الموضوع معقد أضيفي: [TRANSFER_TO_HUMAN]`;
+أول رسالة (بالإنجليزي إذا كتب English):
+"Welcome to ${bizName}! 👋
+
+Please choose:
+1️⃣ Book an appointment
+2️⃣ Services & prices
+3️⃣ Offers & discounts
+4️⃣ Working hours
+5️⃣ Talk to staff"
+
+عندما يختار العميل:
+- 1 (حجز): اسأل عن الخدمة ثم التاريخ ثم الوقت ثم الاسم
+- 2 (خدمات): اعرض الخدمات المتاحة مع أسعارها
+- 3 (عروض): اعرض العروض المتاحة
+- 4 (دوام): أخبره بأوقات الدوام
+- 5 (موظف): أخبره أن موظف سيتواصل معه قريباً وأضف [TRANSFER_TO_HUMAN]
+
+القواعد:
+- لا تذكر اسم العميل قبل أن يعرّفك به
+- ردودك قصيرة ومختصرة
+- إيموجي واحد في الرد كحد أقصى
+- تعرف على الكلمات الشعبية: صبغة/صبغ = تلوين شعر | فيشل/فيشيل = تنظيف بشرة | قص = قص وتصفيف
+
+معلومات المنشأة:
+التاريخ: اليوم ${fmt(today)} | غداً ${fmt(tomorrow)}
+الدوام: ${process.env.BUSINESS_HOURS || "السبت-الخميس 9ص-10م | الجمعة 2م-10م"}
+المواعيد المحجوزة — اليوم: ${todayBooked} | غداً: ${tomorrowBooked}
+الخدمات: ${servicesList}
+العروض: ${offersList}
+
+ما تؤكد الحجز إلا بعد الحصول على: الخدمة + التاريخ + الوقت + الاسم
+عند تأكيد الحجز أضف في نهاية ردك:
+[BOOKING_CONFIRMED: الاسم | الخدمة | التاريخ | الوقت | السعر]
+عند طلب الإلغاء أضف: [BOOKING_CANCELLED: التفاصيل]
+عند التحويل للموظف أضف: [TRANSFER_TO_HUMAN]`;
 }
 
 function parseResponse(text) {
@@ -291,34 +345,71 @@ app.post("/api/bookings/manual", async (req, res) => {
   }
 });
 
+// ─── إرسال رسالة واتساب ─────────────────────────────────────────
+async function sendWhatsApp(phone, msg) {
+  const to = phone.startsWith("whatsapp:") ? phone : "whatsapp:" + phone;
+  await twilioClient.messages.create({
+    from: process.env.TWILIO_WHATSAPP_NUMBER,
+    to, body: msg,
+  });
+}
+
+const bizName = process.env.BUSINESS_NAME || "منشأتنا";
+
 // ─── تذكير تلقائي ────────────────────────────────────────────────
 async function sendReminders() {
   try {
-    const res = await pool.query(
+    // تذكير قبل يوم
+    const dayRes = await pool.query(
       "SELECT * FROM bookings WHERE status='confirmed' AND reminded=false"
     );
     const now = new Date();
-    for (const b of res.rows) {
-      if (!b.phone || b.phone === "") continue;
-      // أرسل تذكير لو الموعد بكره
-      if (b.date === "بكره") {
-        const msg = "هلا " + b.name + "! 😊 نذكرك بموعدك بكره لخدمة " + b.service + " الساعة " + b.time + " في صالون لمسة. نشوفك إن شاء الله!";
+    const tomorrow = new Date(now); tomorrow.setDate(now.getDate()+1);
+    const tomorrowStr = tomorrow.toLocaleDateString("ar-SA");
+
+    for (const b of dayRes.rows) {
+      if (!b.phone) continue;
+      const bookingDate = b.date;
+      const isTomorrow = bookingDate === "بكره" || bookingDate === "غداً" || bookingDate.includes(tomorrowStr);
+      if (isTomorrow) {
+        const ar = `مرحباً ${b.name}! 😊 نذكّرك بموعدك غداً لخدمة "${b.service}" الساعة ${b.time} في ${bizName}. نتطلع لرؤيتك!`;
+        const en = `Hi ${b.name}! 😊 Reminder: your "${b.service}" appointment is tomorrow at ${b.time} at ${bizName}. See you then!`;
+        const msg = /^[a-zA-Z]/.test(b.name) ? en : ar;
         try {
-          await twilioClient.messages.create({
-            from: process.env.TWILIO_WHATSAPP_NUMBER,
-            to: b.phone.startsWith("whatsapp:") ? b.phone : "whatsapp:" + b.phone,
-            body: msg,
-          });
+          await sendWhatsApp(b.phone, msg);
           await pool.query("UPDATE bookings SET reminded=true WHERE id=$1", [b.id]);
-          console.log("✅ تذكير أُرسل لـ:", b.name);
-        } catch (err) {
-          console.error("Reminder error:", err.message);
-        }
+          console.log("✅ تذكير (يوم):", b.name);
+        } catch (err) { console.error("Reminder error:", err.message); }
       }
     }
-  } catch (err) {
-    console.error("Reminders error:", err.message);
-  }
+
+    // تذكير قبل ساعة
+    const hourRes = await pool.query(
+      "SELECT * FROM bookings WHERE status='confirmed' AND reminded_hour=false AND date='اليوم'"
+    );
+    for (const b of hourRes.rows) {
+      if (!b.phone || !b.time) continue;
+      try {
+        // تحقق من الوقت — هل الموعد خلال ساعة؟
+        const [timePart, period] = b.time.split(" ");
+        const [h, m] = timePart.split(":").map(Number);
+        let hour24 = h;
+        if (period === "م" && h !== 12) hour24 = h + 12;
+        if (period === "ص" && h === 12) hour24 = 0;
+        const apptTime = new Date();
+        apptTime.setHours(hour24, m || 0, 0, 0);
+        const diff = (apptTime - now) / (1000 * 60); // بالدقائق
+        if (diff >= 50 && diff <= 70) {
+          const ar = `تذكير: موعدك "${b.service}" بعد ساعة تقريباً الساعة ${b.time} في ${bizName} 🕐`;
+          const en = `Reminder: your "${b.service}" appointment is in about 1 hour at ${b.time} at ${bizName} 🕐`;
+          const msg = /^[a-zA-Z]/.test(b.name) ? en : ar;
+          await sendWhatsApp(b.phone, msg);
+          await pool.query("UPDATE bookings SET reminded_hour=true WHERE id=$1", [b.id]);
+          console.log("✅ تذكير (ساعة):", b.name);
+        }
+      } catch (err) { console.error("Hour reminder error:", err.message); }
+    }
+  } catch (err) { console.error("Reminders error:", err.message); }
 }
 
 // ─── تقييم بعد الخدمة ────────────────────────────────────────────
@@ -327,29 +418,105 @@ async function sendReviews() {
     const res = await pool.query(
       "SELECT * FROM bookings WHERE status='confirmed' AND reviewed=false AND date='اليوم'"
     );
+    const now = new Date();
     for (const b of res.rows) {
-      if (!b.phone || b.phone === "") continue;
-      const msg = "شكراً " + b.name + "! ✨ كيف كانت تجربتك معنا في لمسة؟ قيّمينا من 1 إلى 5 ⭐";
+      if (!b.phone || !b.time) continue;
       try {
-        await twilioClient.messages.create({
-          from: process.env.TWILIO_WHATSAPP_NUMBER,
-          to: b.phone.startsWith("whatsapp:") ? b.phone : "whatsapp:" + b.phone,
-          body: msg,
-        });
-        await pool.query("UPDATE bookings SET reviewed=true WHERE id=$1", [b.id]);
-        console.log("✅ طلب تقييم أُرسل لـ:", b.name);
-      } catch (err) {
-        console.error("Review error:", err.message);
-      }
+        const [timePart, period] = b.time.split(" ");
+        const [h, m] = timePart.split(":").map(Number);
+        let hour24 = h;
+        if (period === "م" && h !== 12) hour24 = h + 12;
+        if (period === "ص" && h === 12) hour24 = 0;
+        const apptEnd = new Date();
+        apptEnd.setHours(hour24 + 1, m || 0, 0, 0); // بعد انتهاء الخدمة بساعة
+        if (now >= apptEnd) {
+          const ar = `شكراً ${b.name}! ✨ كيف كانت تجربتك معنا في ${bizName}؟
+قيّمنا من 1 إلى 5 ⭐
+رأيك يهمنا!`;
+          const en = `Thank you ${b.name}! ✨ How was your experience at ${bizName}?
+Rate us from 1 to 5 ⭐
+Your feedback matters!`;
+          const msg = /^[a-zA-Z]/.test(b.name) ? en : ar;
+          await sendWhatsApp(b.phone, msg);
+          await pool.query("UPDATE bookings SET reviewed=true WHERE id=$1", [b.id]);
+          console.log("✅ تقييم:", b.name);
+        }
+      } catch (err) { console.error("Review error:", err.message); }
     }
-  } catch (err) {
-    console.error("Reviews error:", err.message);
-  }
+  } catch (err) { console.error("Reviews error:", err.message); }
 }
 
-// شغّل التذكير كل ساعة والتقييم كل 3 ساعات
-setInterval(sendReminders, 60 * 60 * 1000);
-setInterval(sendReviews, 3 * 60 * 60 * 1000);
+// شغّل كل 30 دقيقة
+setInterval(sendReminders, 30 * 60 * 1000);
+setInterval(sendReviews,   30 * 60 * 1000);
+
+// ─── API الخدمات ─────────────────────────────────────────────────
+app.get("/api/services", async (_req, res) => {
+  const r = await pool.query("SELECT * FROM services ORDER BY created_at");
+  res.json(r.rows);
+});
+
+app.post("/api/services", async (req, res) => {
+  const { name, description, price, icon } = req.body;
+  if (!name) return res.status(400).json({ error: "اسم الخدمة مطلوب" });
+  try {
+    const r = await pool.query(
+      "INSERT INTO services (name,description,price,icon) VALUES ($1,$2,$3,$4) RETURNING *",
+      [name, description||"", price||0, icon||"⭐"]
+    );
+    res.json(r.rows[0]);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+app.patch("/api/services/:id", async (req, res) => {
+  const { name, description, price, icon, active } = req.body;
+  try {
+    const r = await pool.query(
+      "UPDATE services SET name=$1,description=$2,price=$3,icon=$4,active=$5 WHERE id=$6 RETURNING *",
+      [name, description||"", price||0, icon||"⭐", active!==undefined?active:true, req.params.id]
+    );
+    res.json(r.rows[0]);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete("/api/services/:id", async (req, res) => {
+  await pool.query("DELETE FROM services WHERE id=$1", [req.params.id]);
+  res.json({ success: true });
+});
+
+// ─── API العروض ──────────────────────────────────────────────────
+app.get("/api/offers", async (_req, res) => {
+  const r = await pool.query("SELECT * FROM offers ORDER BY created_at");
+  res.json(r.rows);
+});
+
+app.post("/api/offers", async (req, res) => {
+  const { name, description, price, icon, discount } = req.body;
+  if (!name) return res.status(400).json({ error: "اسم العرض مطلوب" });
+  try {
+    const r = await pool.query(
+      "INSERT INTO offers (name,description,price,icon,discount) VALUES ($1,$2,$3,$4,$5) RETURNING *",
+      [name, description||"", price||0, icon||"🎁", discount||0]
+    );
+    res.json(r.rows[0]);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+app.patch("/api/offers/:id", async (req, res) => {
+  const { name, description, price, icon, discount, active } = req.body;
+  try {
+    const r = await pool.query(
+      "UPDATE offers SET name=$1,description=$2,price=$3,icon=$4,discount=$5,active=$6 WHERE id=$7 RETURNING *",
+      [name, description||"", price||0, icon||"🎁", discount||0, active!==undefined?active:true, req.params.id]
+    );
+    res.json(r.rows[0]);
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete("/api/offers/:id", async (req, res) => {
+  await pool.query("DELETE FROM offers WHERE id=$1", [req.params.id]);
+  res.json({ success: true });
+});
 
 // ─── API المستخدمين ──────────────────────────────────────────────
 
