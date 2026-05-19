@@ -65,6 +65,10 @@ async function initDB() {
       role TEXT DEFAULT 'staff',
       created_at TIMESTAMP DEFAULT NOW()
     );
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT
+    );
     CREATE TABLE IF NOT EXISTS services (
       id SERIAL PRIMARY KEY,
       name TEXT NOT NULL,
@@ -127,9 +131,16 @@ async function buildPrompt() {
   const res2 = await pool.query("SELECT time FROM bookings WHERE date='بكره' AND status='confirmed'");
   const tomorrowBooked = res2.rows.map(r=>r.time).join("، ") || "لا يوجد";
 
-  const lang = process.env.BUSINESS_LANG || "ar";
-  const bizName = process.env.BUSINESS_NAME || "منشأتنا";
-  const bizType = process.env.BUSINESS_TYPE || "منشأة";
+  // جلب الإعدادات من قاعدة البيانات
+  const settingsRes = await pool.query("SELECT key, value FROM settings");
+  const dbSettings = {};
+  settingsRes.rows.forEach(r => dbSettings[r.key] = r.value);
+
+  const bizName  = dbSettings.businessName  || process.env.BUSINESS_NAME  || "منشأتنا";
+  const bizType  = dbSettings.businessType  || process.env.BUSINESS_TYPE  || "منشأة";
+  const bizHours = dbSettings.businessHours || process.env.BUSINESS_HOURS || "السبت-الخميس 9ص-10م";
+  const supportPhone = dbSettings.supportPhone || process.env.SUPPORT_WHATSAPP || "";
+  const supportName  = dbSettings.supportName  || "الموظف المسؤول";
 
   // جلب الخدمات والعروض من قاعدة البيانات
   const svcRes = await pool.query("SELECT * FROM services WHERE active=true ORDER BY created_at");
@@ -185,7 +196,7 @@ Please choose:
 
 معلومات المنشأة:
 التاريخ: اليوم ${fmt(today)} | غداً ${fmt(tomorrow)}
-الدوام: ${process.env.BUSINESS_HOURS || "السبت-الخميس 9ص-10م | الجمعة 2م-10م"}
+الدوام: ${bizHours}
 المواعيد المحجوزة — اليوم: ${todayBooked} | غداً: ${tomorrowBooked}
 الخدمات: ${servicesList}
 العروض: ${offersList}
@@ -212,6 +223,7 @@ function parseResponse(text) {
   } else if (tm) {
     event = { type:"transfer" };
     clean = text.replace(tm[0],"").trim();
+    // إشعار للموظف المسؤول سيتم في webhook
   }
   return { clean, event };
 }
@@ -271,6 +283,37 @@ app.post("/webhook", async (req, res) => {
     const { clean, event } = parseResponse(rawText);
     messages.push({ role:"assistant", content:rawText });
     await saveSession(from, messages);
+
+    // إشعار للموظف عند التحويل
+    if (event?.type === "transfer") {
+      try {
+        const sRes = await pool.query("SELECT key,value FROM settings");
+        const s = {}; sRes.rows.forEach(r=>s[r.key]=r.value);
+        const supportPhone = s.supportPhone || process.env.SUPPORT_WHATSAPP || "";
+        const supportName  = s.supportName  || "الموظف";
+        if (supportPhone) {
+          // آخر 5 رسائل من العميل
+          const history = sessions[from] || [];
+          const lastMsgs = history.slice(-6).filter(m=>m.role==="user").map(m=>"• "+m.content).join("
+");
+          const clientNum = from.replace("whatsapp:","");
+          const notifAr = `🔔 ${supportName}، عميل يحتاج مساعدة!
+
+الرقم: ${clientNum}
+
+آخر رسائله:
+${lastMsgs}
+
+يمكنك التواصل معه مباشرة على: ${clientNum}`;
+          await twilioClient.messages.create({
+            from: process.env.TWILIO_WHATSAPP_NUMBER,
+            to: supportPhone.startsWith("whatsapp:") ? supportPhone : "whatsapp:"+supportPhone,
+            body: notifAr,
+          });
+          console.log("✅ إشعار تحويل أُرسل للموظف:", supportPhone);
+        }
+      } catch(err) { console.error("Transfer notify error:", err.message); }
+    }
 
     if (event?.type === "booking") {
       const bookingId = Date.now();
@@ -353,8 +396,6 @@ async function sendWhatsApp(phone, msg) {
     to, body: msg,
   });
 }
-
-const bizName = process.env.BUSINESS_NAME || "منشأتنا";
 
 // ─── تذكير تلقائي ────────────────────────────────────────────────
 async function sendReminders() {
@@ -449,6 +490,27 @@ Your feedback matters!`;
 // شغّل كل 30 دقيقة
 setInterval(sendReminders, 30 * 60 * 1000);
 setInterval(sendReviews,   30 * 60 * 1000);
+
+// ─── API الإعدادات ───────────────────────────────────────────────
+app.get("/api/settings", async (_req, res) => {
+  const r = await pool.query("SELECT key, value FROM settings");
+  const obj = {};
+  r.rows.forEach(row => obj[row.key] = row.value);
+  res.json(obj);
+});
+
+app.post("/api/settings", async (req, res) => {
+  const entries = Object.entries(req.body);
+  try {
+    for (const [key, value] of entries) {
+      await pool.query(
+        "INSERT INTO settings (key,value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=$2",
+        [key, value]
+      );
+    }
+    res.json({ success: true });
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
 
 // ─── API الخدمات ─────────────────────────────────────────────────
 app.get("/api/services", async (_req, res) => {
