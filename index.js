@@ -294,8 +294,7 @@ app.post("/webhook", async (req, res) => {
         console.log("📱 محاولة إرسال إشعار للرقم:", supportPhone);
         if (supportPhone) {
           // آخر 5 رسائل من العميل
-          const history = sessions[from] || [];
-          const lastMsgs = history.slice(-6).filter(m=>m.role==="user").map(m=>"• "+m.content).join("\n");
+          const lastMsgs = messages.slice(-6).filter(m=>m.role==="user").map(m=>"• "+m.content).join("\n");
           const clientNum = from.replace("whatsapp:","");
           const toNumber = supportPhone.startsWith("whatsapp:") ? supportPhone : "whatsapp:"+supportPhone;
           const notifAr = `🔔 ${supportName}، عميل يحتاج مساعدة!
