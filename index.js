@@ -291,11 +291,13 @@ app.post("/webhook", async (req, res) => {
         const s = {}; sRes.rows.forEach(r=>s[r.key]=r.value);
         const supportPhone = s.supportPhone || process.env.SUPPORT_WHATSAPP || "";
         const supportName  = s.supportName  || "الموظف";
+        console.log("📱 محاولة إرسال إشعار للرقم:", supportPhone);
         if (supportPhone) {
           // آخر 5 رسائل من العميل
           const history = sessions[from] || [];
           const lastMsgs = history.slice(-6).filter(m=>m.role==="user").map(m=>"• "+m.content).join("\n");
           const clientNum = from.replace("whatsapp:","");
+          const toNumber = supportPhone.startsWith("whatsapp:") ? supportPhone : "whatsapp:"+supportPhone;
           const notifAr = `🔔 ${supportName}، عميل يحتاج مساعدة!
 
 الرقم: ${clientNum}
@@ -304,14 +306,17 @@ app.post("/webhook", async (req, res) => {
 ${lastMsgs}
 
 يمكنك التواصل معه مباشرة على: ${clientNum}`;
-          await twilioClient.messages.create({
+          console.log("📤 إرسال إلى:", toNumber);
+          const msg = await twilioClient.messages.create({
             from: process.env.TWILIO_WHATSAPP_NUMBER,
-            to: supportPhone.startsWith("whatsapp:") ? supportPhone : "whatsapp:"+supportPhone,
+            to: toNumber,
             body: notifAr,
           });
-          console.log("✅ إشعار تحويل أُرسل للموظف:", supportPhone);
+          console.log("✅ إشعار تحويل أُرسل! SID:", msg.sid);
+        } else {
+          console.log("⚠️ رقم الموظف غير محدد في الإعدادات");
         }
-      } catch(err) { console.error("Transfer notify error:", err.message); }
+      } catch(err) { console.error("Transfer notify error:", err.message, err.stack); }
     }
 
     if (event?.type === "booking") {
