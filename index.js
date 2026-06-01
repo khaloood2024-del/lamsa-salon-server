@@ -202,11 +202,21 @@ Please choose:
 العروض: ${offersList}
 
 ما تؤكد الحجز إلا بعد الحصول على: الخدمة + التاريخ + الوقت + الاسم
-عند تأكيد حجز جديد أضف في نهاية ردك:
-[BOOKING_CONFIRMED: الاسم | الخدمة | التاريخ | الوقت | السعر]
 
-مهم جداً: إذا طلب العميل تعديل موعد موجود (تغيير التاريخ أو الوقت أو الخدمة)، لا تضيف حجز جديد، بل أضف:
-[BOOKING_UPDATED: الاسم | الخدمة الجديدة | التاريخ الجديد | الوقت الجديد | السعر]
+قاعدة مهمة جداً للوقت: دائماً حوّل الوقت إلى صيغة 12 ساعة بـ AM أو PM بالإنجليزي
+أمثلة:
+- "الظهر" أو "12 ظهراً" → 12:00 PM
+- "العصر" أو "4 عصراً" → 4:00 PM
+- "9 صباحاً" أو "9 الصبح" → 9:00 AM
+- "8 مساءً" أو "8 الليل" → 8:00 PM
+- "نص الليل" → 12:00 AM
+
+عند تأكيد حجز جديد أضف في نهاية ردك:
+[BOOKING_CONFIRMED: الاسم | الخدمة | التاريخ | الوقت بصيغة AM/PM | السعر]
+مثال: [BOOKING_CONFIRMED: أحمد | تنظيف أسنان | الاثنين 2 يونيو 2026 | 2:00 PM | 100 ر.س]
+
+مهم جداً: إذا طلب العميل تعديل موعد موجود، لا تضيف حجز جديد، بل أضف:
+[BOOKING_UPDATED: الاسم | الخدمة الجديدة | التاريخ الجديد | الوقت الجديد بصيغة AM/PM | السعر]
 
 عند طلب الإلغاء أضف: [BOOKING_CANCELLED: التفاصيل]
 عند التحويل للموظف أضف: [TRANSFER_TO_HUMAN]`;
@@ -501,30 +511,18 @@ function parseTimeToHour24(timeStr) {
   if (!timeStr) return null;
   const t = timeStr.trim();
 
-  // صيغة: "8 AM" أو "8:30 AM" أو "8:30AM"
-  const enMatch = t.match(/^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)$/i);
-  if (enMatch) {
-    let h = parseInt(enMatch[1]);
-    const m = parseInt(enMatch[2] || "0");
-    const pm = enMatch[3].toUpperCase() === "PM";
+  // الصيغة الأساسية: "2:00 PM" أو "9:30 AM"
+  const match = t.match(/^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)$/i);
+  if (match) {
+    let h = parseInt(match[1]);
+    const m = parseInt(match[2] || "0");
+    const pm = match[3].toUpperCase() === "PM";
     if (pm && h !== 12) h += 12;
     if (!pm && h === 12) h = 0;
     return { h, m };
   }
 
-  // صيغة عربية: "8 ص" أو "8:30 م" أو "12:40 ظهراً" أو "2 ظهراً" أو "3 مساءً" أو "10 صباحاً"
-  const arMatch = t.match(/^(\d{1,2})(?::(\d{2}))?\s*(ص|م|صباحاً|صباحا|مساءً|مساءا|ظهراً|ظهرا)$/);
-  if (arMatch) {
-    let h = parseInt(arMatch[1]);
-    const m = parseInt(arMatch[2] || "0");
-    const period = arMatch[3];
-    const isPM = period === "م" || period === "مساءً" || period === "مساءا" || period === "ظهراً" || period === "ظهرا";
-    if (isPM && h !== 12) h += 12;
-    if (!isPM && h === 12) h = 0;
-    return { h, m };
-  }
-
-  // صيغة: "08:00" أو "14:30"
+  // صيغة 24 ساعة: "14:30" أو "08:00"
   const plain = t.match(/^(\d{1,2}):(\d{2})$/);
   if (plain) return { h: parseInt(plain[1]), m: parseInt(plain[2]) };
 
