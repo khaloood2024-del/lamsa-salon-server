@@ -369,6 +369,13 @@ app.get("/api/bookings", async (_req, res) => {
   res.json(result.rows);
 });
 
+app.patch("/api/bookings/:id/confirm", async (req, res) => {
+  try {
+    await pool.query("UPDATE bookings SET status='confirmed' WHERE id=$1", [req.params.id]);
+    res.json({ success: true });
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
 app.patch("/api/bookings/:id/cancel", async (req, res) => {
   await pool.query("UPDATE bookings SET status='cancelled' WHERE id=$1", [req.params.id]);
   res.json({ success: true });
@@ -457,33 +464,76 @@ async function sendReminders() {
 }
 
 // ─── تقييم بعد الخدمة ────────────────────────────────────────────
+// تحليل الوقت من أي صيغة (8 AM / 8 ص / 8:00 م)
+function parseTimeToHour24(timeStr) {
+  if (!timeStr) return null;
+  const t = timeStr.trim();
+  // صيغة: "8 AM" أو "8:30 AM"
+  const enMatch = t.match(/^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)$/i);
+  if (enMatch) {
+    let h = parseInt(enMatch[1]);
+    const m = parseInt(enMatch[2] || "0");
+    const pm = enMatch[3].toUpperCase() === "PM";
+    if (pm && h !== 12) h += 12;
+    if (!pm && h === 12) h = 0;
+    return { h, m };
+  }
+  // صيغة: "8 ص" أو "8:30 م"
+  const arMatch = t.match(/^(\d{1,2})(?::(\d{2}))?\s*(ص|م)$/);
+  if (arMatch) {
+    let h = parseInt(arMatch[1]);
+    const m = parseInt(arMatch[2] || "0");
+    if (arMatch[3] === "م" && h !== 12) h += 12;
+    if (arMatch[3] === "ص" && h === 12) h = 0;
+    return { h, m };
+  }
+  // صيغة: "08:00"
+  const plain = t.match(/^(\d{1,2}):(\d{2})$/);
+  if (plain) return { h: parseInt(plain[1]), m: parseInt(plain[2]) };
+  return null;
+}
+
+// فحص إذا كان التاريخ اليوم
+function isToday(dateStr) {
+  if (!dateStr) return false;
+  const today = new Date();
+  const d = dateStr.toLowerCase();
+  if (d === "اليوم" || d === "today") return true;
+  // فحص إذا يحتوي على تاريخ اليوم
+  const todayDay = today.getDate();
+  const todayMonth = today.getMonth(); // 0-based
+  const months = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"];
+  const arMonths = ["يناير","فبراير","مارس","أبريل","مايو","يونيو","يوليو","أغسطس","سبتمبر","أكتوبر","نوفمبر","ديسمبر"];
+  const hasDay = d.includes(String(todayDay));
+  const hasMonth = months.some((m,i) => i === todayMonth && d.includes(m)) ||
+                   arMonths.some((m,i) => i === todayMonth && d.includes(m));
+  return hasDay && hasMonth;
+}
+
 async function sendReviews() {
   try {
+    // نجيب كل الحجوزات المؤكدة اللي ما اتقيّمت بعد
     const res = await pool.query(
-      "SELECT * FROM bookings WHERE status='confirmed' AND reviewed=false AND date='اليوم'"
+      "SELECT * FROM bookings WHERE status='confirmed' AND reviewed=false"
     );
     const now = new Date();
     for (const b of res.rows) {
       if (!b.phone || !b.time) continue;
+      // نتحقق إن الحجز اليوم
+      if (!isToday(b.date)) continue;
       try {
-        const [timePart, period] = b.time.split(" ");
-        const [h, m] = timePart.split(":").map(Number);
-        let hour24 = h;
-        if (period === "م" && h !== 12) hour24 = h + 12;
-        if (period === "ص" && h === 12) hour24 = 0;
+        const parsed = parseTimeToHour24(b.time);
+        if (!parsed) { console.log("⚠️ ما قدرت أحلل الوقت:", b.time); continue; }
         const apptEnd = new Date();
-        apptEnd.setHours(hour24 + 1, m || 0, 0, 0); // بعد انتهاء الخدمة بساعة
+        apptEnd.setHours(parsed.h + 1, parsed.m, 0, 0);
+        console.log(`🕐 فحص تقييم ${b.name}: وقت الانتهاء ${apptEnd.toTimeString()} | الآن ${now.toTimeString()}`);
         if (now >= apptEnd) {
-          const ar = `شكراً ${b.name}! ✨ كيف كانت تجربتك معنا في ${bizName}؟
-قيّمنا من 1 إلى 5 ⭐
-رأيك يهمنا!`;
-          const en = `Thank you ${b.name}! ✨ How was your experience at ${bizName}?
-Rate us from 1 to 5 ⭐
-Your feedback matters!`;
+          const ar = `شكراً ${b.name}! ✨ كيف كانت تجربتك معنا في ${bizName}؟\nقيّمنا من 1 إلى 5 ⭐\nرأيك يهمنا!`;
+          const en = `Thank you ${b.name}! ✨ How was your experience at ${bizName}?\nRate us from 1 to 5 ⭐\nYour feedback matters!`;
           const msg = /^[a-zA-Z]/.test(b.name) ? en : ar;
           await sendWhatsApp(b.phone, msg);
           await pool.query("UPDATE bookings SET reviewed=true WHERE id=$1", [b.id]);
-          console.log("✅ تقييم:", b.name);
+          console.log("✅ تقييم أُرسل:", b.name);
         }
       } catch (err) { console.error("Review error:", err.message); }
     }
