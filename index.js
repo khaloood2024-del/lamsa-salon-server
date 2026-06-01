@@ -202,28 +202,36 @@ Please choose:
 العروض: ${offersList}
 
 ما تؤكد الحجز إلا بعد الحصول على: الخدمة + التاريخ + الوقت + الاسم
-عند تأكيد الحجز أضف في نهاية ردك:
+عند تأكيد حجز جديد أضف في نهاية ردك:
 [BOOKING_CONFIRMED: الاسم | الخدمة | التاريخ | الوقت | السعر]
+
+مهم جداً: إذا طلب العميل تعديل موعد موجود (تغيير التاريخ أو الوقت أو الخدمة)، لا تضيف حجز جديد، بل أضف:
+[BOOKING_UPDATED: الاسم | الخدمة الجديدة | التاريخ الجديد | الوقت الجديد | السعر]
+
 عند طلب الإلغاء أضف: [BOOKING_CANCELLED: التفاصيل]
 عند التحويل للموظف أضف: [TRANSFER_TO_HUMAN]`;
 }
 
 function parseResponse(text) {
   let clean = text; let event = null;
-  const bm = text.match(/\[BOOKING_CONFIRMED:\s*([^\]]+)\]/);
-  const cm = text.match(/\[BOOKING_CANCELLED:\s*([^\]]+)\]/);
-  const tm = text.match(/\[TRANSFER_TO_HUMAN\]/);
+  const bm  = text.match(/\[BOOKING_CONFIRMED:\s*([^\]]+)\]/);
+  const ubm = text.match(/\[BOOKING_UPDATED:\s*([^\]]+)\]/);
+  const cm  = text.match(/\[BOOKING_CANCELLED:\s*([^\]]+)\]/);
+  const tm  = text.match(/\[TRANSFER_TO_HUMAN\]/);
   if (bm) {
     const [name,service,date,time,price] = bm[1].split("|").map(s=>s.trim());
     event = { type:"booking", name, service, date, time, price };
     clean = text.replace(bm[0],"").trim();
+  } else if (ubm) {
+    const [name,service,date,time,price] = ubm[1].split("|").map(s=>s.trim());
+    event = { type:"update", name, service, date, time, price };
+    clean = text.replace(ubm[0],"").trim();
   } else if (cm) {
     event = { type:"cancel" };
     clean = text.replace(cm[0],"").trim();
   } else if (tm) {
     event = { type:"transfer" };
     clean = text.replace(tm[0],"").trim();
-    // إشعار للموظف المسؤول سيتم في webhook
   }
   return { clean, event };
 }
@@ -324,8 +332,32 @@ ${lastMsgs}
         "INSERT INTO bookings (id,phone,name,service,date,time,price,status,source) VALUES ($1,$2,$3,$4,$5,$6,$7,'confirmed','whatsapp')",
         [bookingId, from, event.name, event.service, event.date, event.time, event.price]
       );
-      console.log("✅ حجز:", event.name, event.service, event.time);
+      console.log("✅ حجز جديد:", event.name, event.service, event.time);
       notifyClients({ type:"new_booking", name:event.name, service:event.service, time:event.time });
+    }
+
+    if (event?.type === "update") {
+      // نحدث آخر حجز مؤكد لنفس الرقم
+      const existing = await pool.query(
+        "SELECT id FROM bookings WHERE phone=$1 AND status='confirmed' ORDER BY id DESC LIMIT 1",
+        [from]
+      );
+      if (existing.rows.length > 0) {
+        await pool.query(
+          "UPDATE bookings SET service=$1,date=$2,time=$3,price=$4 WHERE id=$5",
+          [event.service, event.date, event.time, event.price, existing.rows[0].id]
+        );
+        console.log("✅ تعديل حجز:", event.name, event.service, event.time);
+        notifyClients({ type:"updated_booking", name:event.name, service:event.service, time:event.time });
+      } else {
+        // لو ما في حجز قديم، نضيف جديد
+        const bookingId = Date.now();
+        await pool.query(
+          "INSERT INTO bookings (id,phone,name,service,date,time,price,status,source) VALUES ($1,$2,$3,$4,$5,$6,$7,'confirmed','whatsapp')",
+          [bookingId, from, event.name, event.service, event.date, event.time, event.price]
+        );
+        console.log("✅ حجز جديد (بديل):", event.name);
+      }
     }
 
     const twiml = new twilio.twiml.MessagingResponse();
