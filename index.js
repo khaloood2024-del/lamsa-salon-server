@@ -500,7 +500,8 @@ async function sendReminders() {
 function parseTimeToHour24(timeStr) {
   if (!timeStr) return null;
   const t = timeStr.trim();
-  // صيغة: "8 AM" أو "8:30 AM"
+
+  // صيغة: "8 AM" أو "8:30 AM" أو "8:30AM"
   const enMatch = t.match(/^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)$/i);
   if (enMatch) {
     let h = parseInt(enMatch[1]);
@@ -510,18 +511,24 @@ function parseTimeToHour24(timeStr) {
     if (!pm && h === 12) h = 0;
     return { h, m };
   }
-  // صيغة: "8 ص" أو "8:30 م"
-  const arMatch = t.match(/^(\d{1,2})(?::(\d{2}))?\s*(ص|م)$/);
+
+  // صيغة عربية: "8 ص" أو "8:30 م" أو "12:40 ظهراً" أو "2 ظهراً" أو "3 مساءً" أو "10 صباحاً"
+  const arMatch = t.match(/^(\d{1,2})(?::(\d{2}))?\s*(ص|م|صباحاً|صباحا|مساءً|مساءا|ظهراً|ظهرا)$/);
   if (arMatch) {
     let h = parseInt(arMatch[1]);
     const m = parseInt(arMatch[2] || "0");
-    if (arMatch[3] === "م" && h !== 12) h += 12;
-    if (arMatch[3] === "ص" && h === 12) h = 0;
+    const period = arMatch[3];
+    const isPM = period === "م" || period === "مساءً" || period === "مساءا" || period === "ظهراً" || period === "ظهرا";
+    if (isPM && h !== 12) h += 12;
+    if (!isPM && h === 12) h = 0;
     return { h, m };
   }
-  // صيغة: "08:00"
+
+  // صيغة: "08:00" أو "14:30"
   const plain = t.match(/^(\d{1,2}):(\d{2})$/);
   if (plain) return { h: parseInt(plain[1]), m: parseInt(plain[2]) };
+
+  console.log("⚠️ صيغة وقت غير معروفة:", JSON.stringify(t));
   return null;
 }
 
@@ -575,6 +582,9 @@ async function sendReviews() {
 // شغّل كل 30 دقيقة
 setInterval(sendReminders, 30 * 60 * 1000);
 setInterval(sendReviews,   30 * 60 * 1000);
+
+// شغّل مرة عند بدء السيرفر (بعد 10 ثواني)
+setTimeout(()=>{ sendReminders(); sendReviews(); }, 10000);
 
 // ─── API الإعدادات ───────────────────────────────────────────────
 app.get("/api/settings", async (_req, res) => {
