@@ -452,6 +452,7 @@ async function sendWhatsApp(phone, msg) {
 // ─── تذكير تلقائي ────────────────────────────────────────────────
 async function sendReminders() {
   try {
+    const bizName = await getBizName();
     // تذكير قبل يوم
     const dayRes = await pool.query(
       "SELECT * FROM bookings WHERE status='confirmed' AND reminded=false"
@@ -489,8 +490,9 @@ async function sendReminders() {
         let hour24 = h;
         if (period === "م" && h !== 12) hour24 = h + 12;
         if (period === "ص" && h === 12) hour24 = 0;
+        const tzOffset = parseInt(process.env.TZ_OFFSET || "3"); // UTC+3 السعودية
         const apptTime = new Date();
-        apptTime.setHours(hour24, m || 0, 0, 0);
+        apptTime.setUTCHours(hour24 - tzOffset, m || 0, 0, 0);
         const diff = (apptTime - now) / (1000 * 60); // بالدقائق
         if (diff >= 50 && diff <= 70) {
           const ar = `تذكير: موعدك "${b.service}" بعد ساعة تقريباً الساعة ${b.time} في ${bizName} 🕐`;
@@ -547,8 +549,14 @@ function isToday(dateStr) {
   return hasDay && hasMonth;
 }
 
+async function getBizName() {
+  const r = await pool.query("SELECT value FROM settings WHERE key='businessName'");
+  return r.rows[0]?.value || process.env.BUSINESS_NAME || "منشأتنا";
+}
+
 async function sendReviews() {
   try {
+    const bizName = await getBizName();
     // نجيب كل الحجوزات المؤكدة اللي ما اتقيّمت بعد
     const res = await pool.query(
       "SELECT * FROM bookings WHERE status='confirmed' AND reviewed=false"
@@ -561,8 +569,9 @@ async function sendReviews() {
       try {
         const parsed = parseTimeToHour24(b.time);
         if (!parsed) { console.log("⚠️ ما قدرت أحلل الوقت:", b.time); continue; }
+        const tzOffset = parseInt(process.env.TZ_OFFSET || "3"); // UTC+3 السعودية
         const apptEnd = new Date();
-        apptEnd.setHours(parsed.h + 1, parsed.m, 0, 0);
+        apptEnd.setUTCHours(parsed.h - tzOffset + 1, parsed.m, 0, 0);
         console.log(`🕐 فحص تقييم ${b.name}: وقت الانتهاء ${apptEnd.toTimeString()} | الآن ${now.toTimeString()}`);
         if (now >= apptEnd) {
           const ar = `شكراً ${b.name}! ✨ كيف كانت تجربتك معنا في ${bizName}؟\nقيّمنا من 1 إلى 5 ⭐\nرأيك يهمنا!`;
