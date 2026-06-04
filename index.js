@@ -219,7 +219,10 @@ Please choose:
 [BOOKING_UPDATED: الاسم | الخدمة الجديدة | التاريخ الجديد | الوقت الجديد بصيغة AM/PM | السعر]
 
 عند طلب الإلغاء أضف: [BOOKING_CANCELLED: التفاصيل]
-عند التحويل للموظف أضف: [TRANSFER_TO_HUMAN]`;
+عند التحويل للموظف أضف: [TRANSFER_TO_HUMAN]
+
+إذا أرسل العميل رقم تقييم (1-5) أو كلمة مثل "ممتاز" أو "جيد" أو "سيء" كرد أول رسالة في المحادثة:
+رد فقط بـ: "شكرا على تقييمك، نتمنى نشوفك مرة ثانية" ولا تعرض القائمة`;
 }
 
 function parseResponse(text) {
@@ -453,56 +456,59 @@ async function sendWhatsApp(phone, msg) {
 async function sendReminders() {
   try {
     const bizName = await getBizName();
-    // تذكير قبل يوم
-    const dayRes = await pool.query(
-      "SELECT * FROM bookings WHERE status='confirmed' AND reminded=false"
-    );
     const now = new Date();
-    const tomorrow = new Date(now); tomorrow.setDate(now.getDate()+1);
-    const tomorrowStr = tomorrow.toLocaleDateString("ar-SA");
+    const tzOffset = parseInt(process.env.TZ_OFFSET || "3");
 
-    for (const b of dayRes.rows) {
-      if (!b.phone) continue;
-      const bookingDate = b.date;
-      const isTomorrow = bookingDate === "بكره" || bookingDate === "غداً" || bookingDate.includes(tomorrowStr);
-      if (isTomorrow) {
+    // جيب كل الحجوزات المؤكدة اللي ما اتذكّرت
+    const allRes = await pool.query(
+      "SELECT * FROM bookings WHERE status='confirmed' AND (reminded=false OR reminded_hour=false)"
+    );
+
+    for (const b of allRes.rows) {
+      if (!b.phone || !b.time) continue;
+
+      // تحليل الوقت (AM/PM فقط الحين)
+      const parsed = parseTimeToHour24(b.time);
+      if (!parsed) continue;
+
+      // وقت الموعد بتوقيت UTC
+      const apptUTC = new Date();
+      apptUTC.setUTCHours(parsed.h - tzOffset, parsed.m, 0, 0);
+
+      // وقت يوم قبل الموعد
+      const apptUTCTomorrow = new Date(apptUTC);
+      apptUTCTomorrow.setUTCDate(apptUTCTomorrow.getUTCDate() - 1);
+
+      // فحص إذا الحجز غداً (اليوم + 1)
+      const isTomorrow = isTomorrowDate(b.date);
+      // فحص إذا الحجز اليوم
+      const isBookingToday = isToday(b.date);
+
+      // تذكير قبل يوم — يرسل لو الحجز غداً
+      if (!b.reminded && isTomorrow) {
         const ar = `مرحباً ${b.name}! 😊 نذكّرك بموعدك غداً لخدمة "${b.service}" الساعة ${b.time} في ${bizName}. نتطلع لرؤيتك!`;
         const en = `Hi ${b.name}! 😊 Reminder: your "${b.service}" appointment is tomorrow at ${b.time} at ${bizName}. See you then!`;
-        const msg = /^[a-zA-Z]/.test(b.name) ? en : ar;
         try {
-          await sendWhatsApp(b.phone, msg);
+          await sendWhatsApp(b.phone, /^[a-zA-Z]/.test(b.name) ? en : ar);
           await pool.query("UPDATE bookings SET reminded=true WHERE id=$1", [b.id]);
           console.log("✅ تذكير (يوم):", b.name);
-        } catch (err) { console.error("Reminder error:", err.message); }
+        } catch (err) { console.error("Reminder day error:", err.message); }
       }
-    }
 
-    // تذكير قبل ساعة
-    const hourRes = await pool.query(
-      "SELECT * FROM bookings WHERE status='confirmed' AND reminded_hour=false AND date='اليوم'"
-    );
-    for (const b of hourRes.rows) {
-      if (!b.phone || !b.time) continue;
-      try {
-        // تحقق من الوقت — هل الموعد خلال ساعة؟
-        const [timePart, period] = b.time.split(" ");
-        const [h, m] = timePart.split(":").map(Number);
-        let hour24 = h;
-        if (period === "م" && h !== 12) hour24 = h + 12;
-        if (period === "ص" && h === 12) hour24 = 0;
-        const tzOffset = parseInt(process.env.TZ_OFFSET || "3"); // UTC+3 السعودية
-        const apptTime = new Date();
-        apptTime.setUTCHours(hour24 - tzOffset, m || 0, 0, 0);
-        const diff = (apptTime - now) / (1000 * 60); // بالدقائق
-        if (diff >= 50 && diff <= 70) {
-          const ar = `تذكير: موعدك "${b.service}" بعد ساعة تقريباً الساعة ${b.time} في ${bizName} 🕐`;
-          const en = `Reminder: your "${b.service}" appointment is in about 1 hour at ${b.time} at ${bizName} 🕐`;
-          const msg = /^[a-zA-Z]/.test(b.name) ? en : ar;
-          await sendWhatsApp(b.phone, msg);
-          await pool.query("UPDATE bookings SET reminded_hour=true WHERE id=$1", [b.id]);
-          console.log("✅ تذكير (ساعة):", b.name);
+      // تذكير قبل ساعة — يرسل لو الحجز اليوم وبعد 50-70 دقيقة
+      if (!b.reminded_hour && isBookingToday) {
+        const diffMin = (apptUTC - now) / (1000 * 60);
+        console.log(`⏰ فحص تذكير ساعة ${b.name}: الفرق ${Math.round(diffMin)} دقيقة`);
+        if (diffMin >= 50 && diffMin <= 70) {
+          const ar = `تذكير: موعدك "${b.service}" بعد ساعة الساعة ${b.time} في ${bizName} 🕐`;
+          const en = `Reminder: your "${b.service}" appointment is in 1 hour at ${b.time} at ${bizName} 🕐`;
+          try {
+            await sendWhatsApp(b.phone, /^[a-zA-Z]/.test(b.name) ? en : ar);
+            await pool.query("UPDATE bookings SET reminded_hour=true WHERE id=$1", [b.id]);
+            console.log("✅ تذكير (ساعة):", b.name);
+          } catch (err) { console.error("Reminder hour error:", err.message); }
         }
-      } catch (err) { console.error("Hour reminder error:", err.message); }
+      }
     }
   } catch (err) { console.error("Reminders error:", err.message); }
 }
@@ -533,6 +539,22 @@ function parseTimeToHour24(timeStr) {
 }
 
 // فحص إذا كان التاريخ اليوم
+function isTomorrowDate(dateStr) {
+  if (!dateStr) return false;
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const d = dateStr.toLowerCase();
+  if (d === "بكره" || d === "غداً" || d === "غدا" || d === "tomorrow") return true;
+  const tDay   = tomorrow.getDate();
+  const tMonth = tomorrow.getMonth();
+  const months   = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"];
+  const arMonths = ["يناير","فبراير","مارس","أبريل","مايو","يونيو","يوليو","أغسطس","سبتمبر","أكتوبر","نوفمبر","ديسمبر"];
+  const hasDay   = d.includes(String(tDay));
+  const hasMonth = months.some((m,i) => i === tMonth && d.includes(m)) ||
+                   arMonths.some((m,i) => i === tMonth && d.includes(m));
+  return hasDay && hasMonth;
+}
+
 function isToday(dateStr) {
   if (!dateStr) return false;
   const today = new Date();
@@ -579,6 +601,8 @@ async function sendReviews() {
           const msg = /^[a-zA-Z]/.test(b.name) ? en : ar;
           await sendWhatsApp(b.phone, msg);
           await pool.query("UPDATE bookings SET reviewed=true WHERE id=$1", [b.id]);
+          // امسح الجلسة عشان الرد على التقييم ما يختلط مع القائمة
+          await pool.query("DELETE FROM sessions WHERE phone=$1", [b.phone]);
           console.log("✅ تقييم أُرسل:", b.name);
         }
       } catch (err) { console.error("Review error:", err.message); }
