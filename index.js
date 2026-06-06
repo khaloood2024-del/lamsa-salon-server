@@ -464,9 +464,9 @@ async function sendReminders() {
     const now = new Date();
     const tzOffset = parseInt(process.env.TZ_OFFSET || "3");
 
-    // جيب كل الحجوزات المؤكدة اللي ما اتذكّرت
+    // جيب كل الحجوزات المؤكدة اللي ما اتذكّرت - فقط الحجوزات الحديثة (آخر 3 أيام)
     const allRes = await pool.query(
-      "SELECT * FROM bookings WHERE status='confirmed' AND (reminded=false OR reminded_hour=false)"
+      "SELECT * FROM bookings WHERE status='confirmed' AND (reminded=false OR reminded_hour=false) AND created_at >= NOW() - INTERVAL '3 days'"
     );
 
     for (const b of allRes.rows) {
@@ -601,9 +601,9 @@ async function getBizName() {
 async function sendReviews() {
   try {
     const bizName = await getBizName();
-    // نجيب كل الحجوزات المؤكدة اللي ما اتقيّمت بعد
+    // نجيب كل الحجوزات المؤكدة اللي ما اتقيّمت بعد - فقط الحجوزات الحديثة
     const res = await pool.query(
-      "SELECT * FROM bookings WHERE status='confirmed' AND reviewed=false"
+      "SELECT * FROM bookings WHERE status='confirmed' AND reviewed=false AND created_at >= NOW() - INTERVAL '2 days'"
     );
     const now = new Date();
     for (const b of res.rows) {
