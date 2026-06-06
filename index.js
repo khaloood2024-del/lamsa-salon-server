@@ -714,14 +714,16 @@ async function sendReviews() {
           const ar = `شكراً ${b.name}! كيف كانت تجربتك معنا في ${bizName}?\nقيّمنا من 1 إلى 5 ⭐`;
           const en = `Thank you ${b.name}! How was your experience at ${bizName}?\nRate us from 1 to 5 ⭐`;
           const msg = /^[a-zA-Z]/.test(b.name) ? en : ar;
+          // نضمن أن الرقم بصيغة whatsapp: للجلسة
+          const sessionPhone = b.phone.startsWith("whatsapp:") ? b.phone : "whatsapp:" + b.phone;
           await sendWhatsApp(b.phone, msg);
           await pool.query("UPDATE bookings SET reviewed=true WHERE id=$1", [b.id]);
           // احفظ جلسة خاصة تدل على أن العميل في وضع التقييم مع timestamp
           const reviewExpiry = Date.now() + (60 * 60 * 1000); // ساعة للرد على التقييم
-          await saveSession(b.phone, [
+          await saveSession(sessionPhone, [
             { role:"system", content:"REVIEW_MODE:" + reviewExpiry + ": العميل أُرسلت له رسالة التقييم." }
           ]);
-          console.log("✅ تقييم أُرسل:", b.name);
+          console.log("✅ تقييم أُرسل:", b.name, "| جلسة محفوظة لـ:", sessionPhone);
         }
       } catch (err) { console.error("Review error:", err.message); }
     }
