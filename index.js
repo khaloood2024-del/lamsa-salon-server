@@ -69,6 +69,14 @@ async function initDB() {
       key TEXT PRIMARY KEY,
       value TEXT
     );
+    CREATE TABLE IF NOT EXISTS reviews (
+      id SERIAL PRIMARY KEY,
+      phone TEXT,
+      name TEXT,
+      rating INTEGER,
+      note TEXT,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
     CREATE TABLE IF NOT EXISTS services (
       id SERIAL PRIMARY KEY,
       name TEXT NOT NULL,
@@ -311,22 +319,68 @@ app.post("/webhook", async (req, res) => {
     // فحص إذا العميل في وضع التقييم
     const isReviewMode = messages.length > 0 && messages[0]?.content?.startsWith("REVIEW_MODE:");
     if (isReviewMode) {
-      const isRating = /^[1-5]$/.test(body.trim());
-      if (isRating) {
-        // أرسل رسالة الشكر + طلب الملاحظة
-        const bizName = await getBizName();
-        const ar = `شكراً على تقييمك.\nإذا عندك أي ملاحظة أو اقتراح نحب نسمعها.`;
-        const en = `Thank you for your rating.\nFeel free to share any notes or suggestions.`;
-        const replyMsg = /^[a-zA-Z]/.test(body) ? en : ar;
-        // غيّر الجلسة لوضع انتظار الملاحظة
-        await saveSession(from, [
-          { role:"system", content:"FEEDBACK_MODE: العميل قيّم وننتظر ملاحظته الآن." }
-        ]);
-        const twiml = new twilio.twiml.MessagingResponse();
-        twiml.message(replyMsg);
-        return res.type("text/xml").send(twiml.toString());
+      // تحقق من انتهاء الوقت
+      const rvExpiryMatch = messages[0].content.match(/REVIEW_MODE:(\d+):/);
+      const rvExpiry = rvExpiryMatch ? parseInt(rvExpiryMatch[1]) : 0;
+      if (Date.now() > rvExpiry) {
+        // انتهى الوقت — امسح وعالج كرسالة جديدة
+        await pool.query("DELETE FROM sessions WHERE phone=$1", [from]);
+        messages = [];
       } else {
-        // كتب ملاحظة — شكره وامسح الجلسة
+        const isRating = /^[1-5]$/.test(body.trim());
+        if (isRating) {
+          // احفظ التقييم في قاعدة البيانات
+          const ratingNum = parseInt(body.trim());
+          // جيب اسم العميل من آخر حجز
+          const lastBooking = await pool.query(
+            "SELECT name FROM bookings WHERE phone=$1 ORDER BY id DESC LIMIT 1", [from]
+          );
+          const clientName = lastBooking.rows[0]?.name || "";
+          await pool.query(
+            "INSERT INTO reviews (phone, name, rating) VALUES ($1,$2,$3)",
+            [from, clientName, ratingNum]
+          );
+          // أرسل رسالة الشكر + طلب الملاحظة
+          const ar = `شكراً على تقييمك.\nإذا عندك أي ملاحظة أو اقتراح نحب نسمعها.`;
+          const en = `Thank you for your rating.\nFeel free to share any notes or suggestions.`;
+          const replyMsg = /^[a-zA-Z]/.test(body) ? en : ar;
+          // غيّر الجلسة لوضع انتظار الملاحظة (5 دقائق) مع حفظ التقييم
+          const feedbackExpiry = Date.now() + (5 * 60 * 1000);
+          await saveSession(from, [
+            { role:"system", content:"FEEDBACK_MODE:" + feedbackExpiry + ":rating=" + ratingNum + ": العميل قيّم وننتظر ملاحظته الآن." }
+          ]);
+          const twiml = new twilio.twiml.MessagingResponse();
+          twiml.message(replyMsg);
+          return res.type("text/xml").send(twiml.toString());
+        } else {
+          // كتب شيء آخر — امسح وعالج كرسالة جديدة
+          await pool.query("DELETE FROM sessions WHERE phone=$1", [from]);
+          messages = [];
+        }
+      }
+    }
+
+    // فحص إذا العميل في وضع انتظار الملاحظة
+    const isFeedbackMode = messages.length > 0 && messages[0]?.content?.startsWith("FEEDBACK_MODE:");
+    if (isFeedbackMode) {
+      // تحقق من انتهاء الوقت (5 دقائق)
+      const expiryMatch = messages[0].content.match(/FEEDBACK_MODE:(\d+):/);
+      const expiry = expiryMatch ? parseInt(expiryMatch[1]) : 0;
+      if (Date.now() > expiry) {
+        // انتهى الوقت — امسح الجلسة وعالج الرسالة كرسالة جديدة
+        await pool.query("DELETE FROM sessions WHERE phone=$1", [from]);
+        messages = [];
+      } else {
+        // لسه في الوقت — احفظ الملاحظة ورد عليها
+        const ratingMatch = messages[0].content.match(/rating=(\d+)/);
+        const ratingNum = ratingMatch ? parseInt(ratingMatch[1]) : null;
+        if (ratingNum) {
+          // أضف الملاحظة للتقييم المحفوظ
+          await pool.query(
+            "UPDATE reviews SET note=$1 WHERE phone=$2 AND rating=$3 AND note IS NULL ORDER BY created_at DESC LIMIT 1",
+            [body, from, ratingNum]
+          );
+        }
         const ar = `شكراً على ملاحظتك، سنأخذها بعين الاعتبار.`;
         const en = `Thank you for your feedback, we'll take it into consideration.`;
         const replyMsg = /^[a-zA-Z]/.test(body) ? en : ar;
@@ -335,18 +389,6 @@ app.post("/webhook", async (req, res) => {
         twiml.message(replyMsg);
         return res.type("text/xml").send(twiml.toString());
       }
-    }
-
-    // فحص إذا العميل في وضع انتظار الملاحظة
-    const isFeedbackMode = messages.length > 0 && messages[0]?.content?.startsWith("FEEDBACK_MODE:");
-    if (isFeedbackMode) {
-      const ar = `شكراً على ملاحظتك، سنأخذها بعين الاعتبار.`;
-      const en = `Thank you for your feedback, we'll take it into consideration.`;
-      const replyMsg = /^[a-zA-Z]/.test(body) ? en : ar;
-      await pool.query("DELETE FROM sessions WHERE phone=$1", [from]);
-      const twiml = new twilio.twiml.MessagingResponse();
-      twiml.message(replyMsg);
-      return res.type("text/xml").send(twiml.toString());
     }
 
     messages.push({ role:"user", content:body });
@@ -670,9 +712,10 @@ async function sendReviews() {
           const msg = /^[a-zA-Z]/.test(b.name) ? en : ar;
           await sendWhatsApp(b.phone, msg);
           await pool.query("UPDATE bookings SET reviewed=true WHERE id=$1", [b.id]);
-          // احفظ جلسة خاصة تدل على أن العميل في وضع التقييم
+          // احفظ جلسة خاصة تدل على أن العميل في وضع التقييم مع timestamp
+          const reviewExpiry = Date.now() + (60 * 60 * 1000); // ساعة للرد على التقييم
           await saveSession(b.phone, [
-            { role:"system", content:"REVIEW_MODE: العميل أُرسلت له رسالة التقييم. انتظر ردّه بالتقييم." }
+            { role:"system", content:"REVIEW_MODE:" + reviewExpiry + ": العميل أُرسلت له رسالة التقييم." }
           ]);
           console.log("✅ تقييم أُرسل:", b.name);
         }
@@ -687,6 +730,12 @@ setInterval(sendReviews,   30 * 60 * 1000);
 
 // شغّل مرة عند بدء السيرفر (بعد 10 ثواني)
 setTimeout(()=>{ sendReminders(); sendReviews(); }, 10000);
+
+// ─── API التقييمات ───────────────────────────────────────────────
+app.get("/api/reviews", async (_req, res) => {
+  const r = await pool.query("SELECT * FROM reviews ORDER BY created_at DESC");
+  res.json(r.rows);
+});
 
 // ─── API الإعدادات ───────────────────────────────────────────────
 app.get("/api/settings", async (_req, res) => {
