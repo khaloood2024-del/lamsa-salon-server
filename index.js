@@ -194,6 +194,11 @@ Please choose:
 - إيموجي واحد في الرد كحد أقصى
 - تعرف على الكلمات الشعبية: صبغة/صبغ = تلوين شعر | فيشل/فيشيل = تنظيف بشرة | قص = قص وتصفيف
 
+التقييم: إذا أرسل العميل رقماً من 1 إلى 5 كتقييم:
+- رد بشكر بسيط بدون إيموجي مثل: "شكراً على تقييمك، نتمنى نشوفك مرة ثانية."
+- إذا كتب ملاحظة أو اقتراحاً بعد التقييم رد بـ: "شكراً على ملاحظتك، سنأخذها بعين الاعتبار."
+- لا تعرض عليه القائمة الرئيسية بعد التقييم
+
 معلومات المنشأة:
 التاريخ: اليوم ${fmt(today)} | غداً ${fmt(tomorrow)}
 الدوام: ${bizHours}
@@ -302,6 +307,48 @@ app.post("/webhook", async (req, res) => {
 
   try {
     let messages = await getSession(from);
+
+    // فحص إذا العميل في وضع التقييم
+    const isReviewMode = messages.length > 0 && messages[0]?.content?.startsWith("REVIEW_MODE:");
+    if (isReviewMode) {
+      const isRating = /^[1-5]$/.test(body.trim());
+      if (isRating) {
+        // أرسل رسالة الشكر + طلب الملاحظة
+        const bizName = await getBizName();
+        const ar = `شكراً على تقييمك.\nإذا عندك أي ملاحظة أو اقتراح نحب نسمعها.`;
+        const en = `Thank you for your rating.\nFeel free to share any notes or suggestions.`;
+        const replyMsg = /^[a-zA-Z]/.test(body) ? en : ar;
+        // غيّر الجلسة لوضع انتظار الملاحظة
+        await saveSession(from, [
+          { role:"system", content:"FEEDBACK_MODE: العميل قيّم وننتظر ملاحظته الآن." }
+        ]);
+        const twiml = new twilio.twiml.MessagingResponse();
+        twiml.message(replyMsg);
+        return res.type("text/xml").send(twiml.toString());
+      } else {
+        // كتب ملاحظة — شكره وامسح الجلسة
+        const ar = `شكراً على ملاحظتك، سنأخذها بعين الاعتبار.`;
+        const en = `Thank you for your feedback, we'll take it into consideration.`;
+        const replyMsg = /^[a-zA-Z]/.test(body) ? en : ar;
+        await pool.query("DELETE FROM sessions WHERE phone=$1", [from]);
+        const twiml = new twilio.twiml.MessagingResponse();
+        twiml.message(replyMsg);
+        return res.type("text/xml").send(twiml.toString());
+      }
+    }
+
+    // فحص إذا العميل في وضع انتظار الملاحظة
+    const isFeedbackMode = messages.length > 0 && messages[0]?.content?.startsWith("FEEDBACK_MODE:");
+    if (isFeedbackMode) {
+      const ar = `شكراً على ملاحظتك، سنأخذها بعين الاعتبار.`;
+      const en = `Thank you for your feedback, we'll take it into consideration.`;
+      const replyMsg = /^[a-zA-Z]/.test(body) ? en : ar;
+      await pool.query("DELETE FROM sessions WHERE phone=$1", [from]);
+      const twiml = new twilio.twiml.MessagingResponse();
+      twiml.message(replyMsg);
+      return res.type("text/xml").send(twiml.toString());
+    }
+
     messages.push({ role:"user", content:body });
     if (messages.length > 20) messages = messages.slice(-20);
 
@@ -618,13 +665,15 @@ async function sendReviews() {
         apptEnd.setUTCHours(parsed.h - tzOffset + 1, parsed.m, 0, 0);
         console.log(`🕐 فحص تقييم ${b.name}: وقت الانتهاء ${apptEnd.toTimeString()} | الآن ${now.toTimeString()}`);
         if (now >= apptEnd) {
-          const ar = `شكراً ${b.name}! ✨ كيف كانت تجربتك معنا في ${bizName}؟\nقيّمنا من 1 إلى 5 ⭐\nرأيك يهمنا!`;
-          const en = `Thank you ${b.name}! ✨ How was your experience at ${bizName}?\nRate us from 1 to 5 ⭐\nYour feedback matters!`;
+          const ar = `شكراً ${b.name}! كيف كانت تجربتك معنا في ${bizName}?\nقيّمنا من 1 إلى 5 ⭐`;
+          const en = `Thank you ${b.name}! How was your experience at ${bizName}?\nRate us from 1 to 5 ⭐`;
           const msg = /^[a-zA-Z]/.test(b.name) ? en : ar;
           await sendWhatsApp(b.phone, msg);
           await pool.query("UPDATE bookings SET reviewed=true WHERE id=$1", [b.id]);
-          // امسح الجلسة عشان الرد على التقييم ما يختلط مع القائمة
-          await pool.query("DELETE FROM sessions WHERE phone=$1", [b.phone]);
+          // احفظ جلسة خاصة تدل على أن العميل في وضع التقييم
+          await saveSession(b.phone, [
+            { role:"system", content:"REVIEW_MODE: العميل أُرسلت له رسالة التقييم. انتظر ردّه بالتقييم." }
+          ]);
           console.log("✅ تقييم أُرسل:", b.name);
         }
       } catch (err) { console.error("Review error:", err.message); }
