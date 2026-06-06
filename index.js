@@ -353,9 +353,13 @@ app.post("/webhook", async (req, res) => {
           twiml.message(replyMsg);
           return res.type("text/xml").send(twiml.toString());
         } else {
-          // كتب شيء آخر — امسح وعالج كرسالة جديدة
-          await pool.query("DELETE FROM sessions WHERE phone=$1", [from]);
-          messages = [];
+          // كتب شيء آخر — ذكّره بالتقييم ولا تبدأ محادثة جديدة
+          const ar = `من فضلك قيّمنا من 1 إلى 5 ⭐`;
+          const en = `Please rate us from 1 to 5 ⭐`;
+          const replyMsg = /^[a-zA-Z]/.test(body) ? en : ar;
+          const twiml = new twilio.twiml.MessagingResponse();
+          twiml.message(replyMsg);
+          return res.type("text/xml").send(twiml.toString());
         }
       }
     }
