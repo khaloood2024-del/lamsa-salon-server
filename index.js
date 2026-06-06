@@ -415,7 +415,11 @@ app.post("/webhook", async (req, res) => {
           // آخر 5 رسائل من العميل
           const lastMsgs = messages.slice(-6).filter(m=>m.role==="user").map(m=>"• "+m.content).join("\n");
           const clientNum = from.replace("whatsapp:","");
-          const toNumber = supportPhone.startsWith("whatsapp:") ? supportPhone : "whatsapp:"+supportPhone;
+          let spNum = supportPhone.replace("whatsapp:","").trim();
+          if (spNum.startsWith("05")) spNum = "+966" + spNum.slice(1);
+          else if (spNum.startsWith("5") && spNum.length === 9) spNum = "+966" + spNum;
+          if (!spNum.startsWith("+") && !spNum.startsWith("00")) spNum = "+" + spNum;
+          const toNumber = "whatsapp:" + spNum;
           const notifAr = `🔔 ${supportName}، عميل يحتاج مساعدة!
 
 الرقم: ${clientNum}
@@ -543,7 +547,13 @@ app.post("/api/bookings/manual", async (req, res) => {
 
 // ─── إرسال رسالة واتساب ─────────────────────────────────────────
 async function sendWhatsApp(phone, msg) {
-  const to = phone.startsWith("whatsapp:") ? phone : "whatsapp:" + phone;
+  let p = phone.replace("whatsapp:","").trim();
+  // تحويل 05XXXXXXXX → +9665XXXXXXXX
+  if (p.startsWith("05")) p = "+966" + p.slice(1);
+  else if (p.startsWith("5") && p.length === 9) p = "+966" + p;
+  // تأكد من وجود +
+  if (!p.startsWith("+") && !p.startsWith("00")) p = "+" + p;
+  const to = "whatsapp:" + p;
   await twilioClient.messages.create({
     from: process.env.TWILIO_WHATSAPP_NUMBER,
     to, body: msg,
