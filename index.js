@@ -607,7 +607,7 @@ async function sendReminders() {
       if (!b.reminded_hour && isBookingToday) {
         const diffMin = (apptUTC - now) / (1000 * 60);
         console.log(`⏰ فحص تذكير ساعة ${b.name}: الفرق ${Math.round(diffMin)} دقيقة`);
-        if (diffMin >= 50 && diffMin <= 70) {
+        if (diffMin >= 30 && diffMin <= 90) {
           const ar = `تذكير: موعدك "${b.service}" بعد ساعة الساعة ${b.time} في ${bizName} 🕐`;
           const en = `Reminder: your "${b.service}" appointment is in 1 hour at ${b.time} at ${bizName} 🕐`;
           try {
