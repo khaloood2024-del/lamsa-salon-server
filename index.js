@@ -9,7 +9,7 @@ app.use(express.json());
 // السماح للداشبورد بالوصول
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Methods", "GET, PATCH, OPTIONS");
+  res.header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
   res.header("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") return res.sendStatus(200);
   next();
@@ -561,6 +561,28 @@ app.patch("/api/bookings/:id/confirm", async (req, res) => {
 app.patch("/api/bookings/:id/cancel", async (req, res) => {
   await pool.query("UPDATE bookings SET status='cancelled' WHERE id=$1", [req.params.id]);
   res.json({ success: true });
+});
+
+// ─── حذف كل الحجوزات (للمدير فقط) ────────────────────────────────
+app.delete("/api/bookings/all", async (req, res) => {
+  const { username, password } = req.body || {};
+  try {
+    // تحقق أن الطالب مدير فعلاً
+    const u = await pool.query(
+      "SELECT role FROM users WHERE username=$1 AND password=$2",
+      [username, password]
+    );
+    if (u.rows.length === 0 || u.rows[0].role !== "admin") {
+      return res.status(403).json({ error: "غير مصرح — هذا الإجراء للمدير فقط" });
+    }
+    const result = await pool.query("DELETE FROM bookings");
+    console.log("🗑️ حُذفت كل الحجوزات بواسطة:", username);
+    notifyClients({ type:"bookings_cleared" });
+    res.json({ success: true, deleted: result.rowCount });
+  } catch (err) {
+    console.error("Delete all error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ─── إضافة حجز يدوي من الداشبورد ────────────────────────────────
