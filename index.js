@@ -134,9 +134,20 @@ async function buildPrompt() {
   const today    = new Date(now); today.setHours(0,0,0,0);
   const tomorrow = new Date(today); tomorrow.setDate(today.getDate()+1);
 
-  const res = await pool.query("SELECT time FROM bookings WHERE date='اليوم' AND status='confirmed'");
+  // التواريخ الفعلية كما تُحفظ في قاعدة البيانات (مثال: "الأحد 7 يونيو 2026")
+  const todayStr    = fmt(today);
+  const tomorrowStr = fmt(tomorrow);
+
+  // نجلب المواعيد المحجوزة لليوم وغداً — نطابق التاريخ الكامل + الكلمات القديمة احتياطاً
+  const res = await pool.query(
+    "SELECT time FROM bookings WHERE status='confirmed' AND (date=$1 OR date='اليوم')",
+    [todayStr]
+  );
   const todayBooked = res.rows.map(r=>r.time).join("، ") || "لا يوجد";
-  const res2 = await pool.query("SELECT time FROM bookings WHERE date='بكره' AND status='confirmed'");
+  const res2 = await pool.query(
+    "SELECT time FROM bookings WHERE status='confirmed' AND (date=$1 OR date='بكره' OR date='غداً')",
+    [tomorrowStr]
+  );
   const tomorrowBooked = res2.rows.map(r=>r.time).join("، ") || "لا يوجد";
 
   // جلب الإعدادات من قاعدة البيانات
@@ -162,7 +173,14 @@ async function buildPrompt() {
 
   return `أنت موظف استقبال سعودي محترف في ${bizType} اسمها "${bizName}".
 تتكلم بشكل طبيعي تماماً مثل موظف واتساب حقيقي.
-لغتك سليمة ولا تكتب كلمات مكسورة أو فيها أخطاء إملائية.
+
+─── قاعدة الإملاء (إلزامية) ───
+اكتب عربية فصيحة سليمة 100% بدون أي خطأ إملائي.
+انتبه جيداً للتاء المربوطة (ة) والهاء (ه)، والهمزات (أ إ آ ء ؤ ئ).
+أمثلة على الكتابة الصحيحة:
+"عيادة" لا "عياده" | "الجميلة" لا "الجميله" | "الساعة" لا "الساعه"
+"الابتسامة" لا "الابتسامه" | "موعد" لا "موعد" | "أبشر" لا "ابشر"
+راجع كل كلمة قبل الإرسال — الأخطاء الإملائية غير مقبولة إطلاقاً.
 
 ─── قاعدة اللغة ───
 عربي → رد عربي | إنجليزي → رد إنجليزي
@@ -193,10 +211,10 @@ async function buildPrompt() {
 المواعيد المحجوزة اليوم: ${todayBooked}
 المواعيد المحجوزة غداً: ${tomorrowBooked}
 
-عندما يطلب العميل وقتاً:
-- إذا الوقت غير محجوز → احجزه مباشرة
-- إذا الوقت محجوز → أخبره وقترح بديلاً قريباً منه
-  مثال صحيح: "هذا الوقت محجوز، يتوفر لدينا 1:30 PM أو 2:30 PM، أيهما يناسبك؟"
+اعتمد على القائمة أعلاه فقط. أي وقت غير مذكور فيها = متاح.
+- إذا الوقت غير مذكور في القائمة → احجزه مباشرة (لا تقل إنه محجوز)
+- إذا الوقت مذكور في القائمة → أخبر العميل أنه محجوز واقترح وقتاً غير موجود في القائمة
+ممنوع منعاً باتاً اختراع تعارض لوقت غير مذكور في القائمة.
 
 عندما يقول العميل "اليوم" أو "بكرة" بدون وقت:
 - اسأله: "أي وقت يناسبك؟"
@@ -430,6 +448,21 @@ ${lastMsgs}
     }
 
     if (event?.type === "booking") {
+      // حماية برمجية ضد الحجز المزدوج — نتحقق من قاعدة البيانات قبل الإضافة
+      const conflict = await pool.query(
+        "SELECT id FROM bookings WHERE date=$1 AND time=$2 AND status='confirmed'",
+        [event.date, event.time]
+      );
+      if (conflict.rows.length > 0) {
+        console.log("⛔ رُفض حجز مزدوج:", event.date, event.time);
+        const isEn = /^[a-zA-Z]/.test(event.name || "");
+        const busyMsg = isEn
+          ? `Sorry, ${event.time} on ${event.date} was just booked. Could you pick another time?`
+          : `عذراً، الموعد ${event.time} يوم ${event.date} انحجز للتو. ممكن تختار وقت ثاني؟`;
+        const twiml = new twilio.twiml.MessagingResponse();
+        twiml.message(busyMsg);
+        return res.type("text/xml").send(twiml.toString());
+      }
       const bookingId = Date.now();
       await pool.query(
         "INSERT INTO bookings (id,phone,name,service,date,time,price,status,source) VALUES ($1,$2,$3,$4,$5,$6,$7,'confirmed','whatsapp')",
@@ -453,7 +486,21 @@ ${lastMsgs}
         console.log("✅ تعديل حجز:", event.name, event.service, event.time);
         notifyClients({ type:"updated_booking", name:event.name, service:event.service, time:event.time });
       } else {
-        // لو ما في حجز قديم، نضيف جديد
+        // لو ما في حجز قديم، نضيف جديد — مع فحص التعارض
+        const conflict2 = await pool.query(
+          "SELECT id FROM bookings WHERE date=$1 AND time=$2 AND status='confirmed'",
+          [event.date, event.time]
+        );
+        if (conflict2.rows.length > 0) {
+          console.log("⛔ رُفض حجز مزدوج (تعديل):", event.date, event.time);
+          const isEn = /^[a-zA-Z]/.test(event.name || "");
+          const busyMsg = isEn
+            ? `Sorry, ${event.time} on ${event.date} is already booked. Could you pick another time?`
+            : `عذراً، الموعد ${event.time} يوم ${event.date} محجوز. ممكن تختار وقت ثاني؟`;
+          const twiml = new twilio.twiml.MessagingResponse();
+          twiml.message(busyMsg);
+          return res.type("text/xml").send(twiml.toString());
+        }
         const bookingId = Date.now();
         await pool.query(
           "INSERT INTO bookings (id,phone,name,service,date,time,price,status,source) VALUES ($1,$2,$3,$4,$5,$6,$7,'confirmed','whatsapp')",
