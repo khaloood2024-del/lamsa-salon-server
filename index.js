@@ -202,10 +202,18 @@ Please choose:
 - إيموجي واحد في الرد كحد أقصى
 - تعرف على الكلمات الشعبية: صبغة/صبغ = تلوين شعر | فيشل/فيشيل = تنظيف بشرة | قص = قص وتصفيف
 
-التقييم: إذا أرسل العميل رقماً من 1 إلى 5 كتقييم:
-- رد بشكر بسيط بدون إيموجي مثل: "شكراً على تقييمك، نتمنى نشوفك مرة ثانية."
-- إذا كتب ملاحظة أو اقتراحاً بعد التقييم رد بـ: "شكراً على ملاحظتك، سنأخذها بعين الاعتبار."
-- لا تعرض عليه القائمة الرئيسية بعد التقييم
+مسار المحادثة:
+عندما يختار العميل من القائمة:
+- 1: اسأل عن الخدمة، ثم التاريخ، ثم الوقت، ثم الاسم — بالترتيب
+- 2: اعرض الخدمات فقط
+- 3: اعرض العروض فقط
+- 4: أخبره بالدوام فقط
+- 5: حوّله للموظف فقط
+
+قواعد مهمة:
+- لا تعرض القائمة إلا في أول رسالة أو إذا طلب العميل صراحةً
+- لا تخلط بين طلبات مختلفة في نفس الرد
+- إذا سألك عن شيء خارج نطاق عملك قل: "عذراً، هذا خارج نطاق خدماتنا."
 
 معلومات المنشأة:
 التاريخ: اليوم ${fmt(today)} | غداً ${fmt(tomorrow)}
@@ -378,12 +386,17 @@ app.post("/webhook", async (req, res) => {
         // لسه في الوقت — احفظ الملاحظة ورد عليها
         const ratingMatch = messages[0].content.match(/rating=(\d+)/);
         const ratingNum = ratingMatch ? parseInt(ratingMatch[1]) : null;
-        if (ratingNum) {
-          // أضف الملاحظة للتقييم المحفوظ
+        // أضف الملاحظة لآخر تقييم من هذا الرقم
+        const lastReview = await pool.query(
+          "SELECT id FROM reviews WHERE phone=$1 AND note IS NULL ORDER BY created_at DESC LIMIT 1",
+          [from]
+        );
+        if (lastReview.rows.length > 0) {
           await pool.query(
-            "UPDATE reviews SET note=$1 WHERE phone=$2 AND rating=$3 AND note IS NULL ORDER BY created_at DESC LIMIT 1",
-            [body, from, ratingNum]
+            "UPDATE reviews SET note=$1 WHERE id=$2",
+            [body, lastReview.rows[0].id]
           );
+          console.log("✅ ملاحظة محفوظة:", body);
         }
         const ar = `شكراً على ملاحظتك، سنأخذها بعين الاعتبار.`;
         const en = `Thank you for your feedback, we'll take it into consideration.`;
