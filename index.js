@@ -285,6 +285,39 @@ async function callAI(messages) {
   return data.choices?.[0]?.message?.content || "عذراً، صار خطأ.";
 }
 
+// ─── فحص التعارض واقتراح وقت بديل ──────────────────────────────────
+// تحويل (ساعة 24، دقيقة) إلى صيغة "H:MM AM/PM"
+function toAmPm(h24, m) {
+  const period = h24 >= 12 ? "PM" : "AM";
+  let h = h24 % 12; if (h === 0) h = 12;
+  return `${h}:${String(m).padStart(2,"0")} ${period}`;
+}
+
+// هل هذا الوقت محجوز في هذا التاريخ؟
+async function isSlotTaken(date, time, excludeId=null) {
+  const q = excludeId
+    ? "SELECT id FROM bookings WHERE date=$1 AND time=$2 AND status='confirmed' AND id<>$3"
+    : "SELECT id FROM bookings WHERE date=$1 AND time=$2 AND status='confirmed'";
+  const params = excludeId ? [date, time, excludeId] : [date, time];
+  const r = await pool.query(q, params);
+  return r.rows.length > 0;
+}
+
+// يبحث عن أقرب وقت متاح بعد الوقت المطلوب (بفواصل 30 دقيقة)
+async function findNextFreeSlot(date, time) {
+  const parsed = parseTimeToHour24(time);
+  if (!parsed) return null;
+  let total = parsed.h * 60 + parsed.m;
+  for (let i = 0; i < 16; i++) {       // نجرّب حتى 8 ساعات قدام
+    total += 30;
+    const h = Math.floor(total / 60) % 24;
+    const m = total % 60;
+    const candidate = toAmPm(h, m);
+    if (!(await isSlotTaken(date, candidate))) return candidate;
+  }
+  return null;
+}
+
 // ─── Webhook ──────────────────────────────────────────────────────
 app.post("/webhook", async (req, res) => {
   const from = req.body.From;
@@ -426,6 +459,25 @@ ${lastMsgs}
     }
 
     if (event?.type === "booking") {
+      // فحص التعارض في قاعدة البيانات قبل أي حجز
+      if (await isSlotTaken(event.date, event.time)) {
+        console.log("⛔ تعارض حجز:", event.date, event.time);
+        const isEn = /^[a-zA-Z]/.test(event.name || "");
+        const free = await findNextFreeSlot(event.date, event.time);
+        const busyMsg = isEn
+          ? (free
+              ? `Sorry, ${event.time} is already booked. The nearest available time is ${free}. Does that work?`
+              : `Sorry, ${event.time} is already booked. Could you pick another time?`)
+          : (free
+              ? `عذراً، الوقت ${event.time} محجوز. أقرب وقت متاح هو ${free}، يناسبك؟`
+              : `عذراً، الوقت ${event.time} محجوز. ممكن تختار وقت ثاني؟`);
+        // نصحّح الجلسة حتى لا يظن الـ AI أن الحجز تم
+        messages.push({ role:"system", content:`النظام رفض الحجز: الوقت ${event.time} محجوز مسبقاً. لم يتم الحجز. اطلب من العميل وقتاً آخر${free?` (مثل ${free})`:""}.` });
+        await saveSession(from, messages);
+        const twiml = new twilio.twiml.MessagingResponse();
+        twiml.message(busyMsg);
+        return res.type("text/xml").send(twiml.toString());
+      }
       const bookingId = Date.now();
       await pool.query(
         "INSERT INTO bookings (id,phone,name,service,date,time,price,status,source) VALUES ($1,$2,$3,$4,$5,$6,$7,'confirmed','whatsapp')",
@@ -441,6 +493,23 @@ ${lastMsgs}
         "SELECT id FROM bookings WHERE phone=$1 AND status='confirmed' ORDER BY id DESC LIMIT 1",
         [from]
       );
+      // فحص التعارض مع حجوزات الآخرين (نستثني حجز العميل نفسه)
+      const excludeId = existing.rows[0]?.id || null;
+      if (await isSlotTaken(event.date, event.time, excludeId)) {
+        console.log("⛔ تعارض تعديل:", event.date, event.time);
+        const isEn = /^[a-zA-Z]/.test(event.name || "");
+        const free = await findNextFreeSlot(event.date, event.time);
+        const busyMsg = isEn
+          ? (free ? `Sorry, ${event.time} is already booked. The nearest available time is ${free}. Does that work?`
+                  : `Sorry, ${event.time} is already booked. Could you pick another time?`)
+          : (free ? `عذراً، الوقت ${event.time} محجوز. أقرب وقت متاح هو ${free}، يناسبك؟`
+                  : `عذراً، الوقت ${event.time} محجوز. ممكن تختار وقت ثاني؟`);
+        messages.push({ role:"system", content:`النظام رفض التعديل: الوقت ${event.time} محجوز مسبقاً. اطلب من العميل وقتاً آخر${free?` (مثل ${free})`:""}.` });
+        await saveSession(from, messages);
+        const twiml = new twilio.twiml.MessagingResponse();
+        twiml.message(busyMsg);
+        return res.type("text/xml").send(twiml.toString());
+      }
       if (existing.rows.length > 0) {
         await pool.query(
           "UPDATE bookings SET service=$1,date=$2,time=$3,price=$4 WHERE id=$5",
