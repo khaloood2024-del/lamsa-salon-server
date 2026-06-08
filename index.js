@@ -9,7 +9,7 @@ app.use(express.json());
 // السماح للداشبورد بالوصول
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
+  res.header("Access-Control-Allow-Methods", "GET, PATCH, OPTIONS");
   res.header("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") return res.sendStatus(200);
   next();
@@ -134,20 +134,9 @@ async function buildPrompt() {
   const today    = new Date(now); today.setHours(0,0,0,0);
   const tomorrow = new Date(today); tomorrow.setDate(today.getDate()+1);
 
-  // التواريخ الفعلية كما تُحفظ في قاعدة البيانات (مثال: "الأحد 7 يونيو 2026")
-  const todayStr    = fmt(today);
-  const tomorrowStr = fmt(tomorrow);
-
-  // نجلب المواعيد المحجوزة لليوم وغداً — نطابق التاريخ الكامل + الكلمات القديمة احتياطاً
-  const res = await pool.query(
-    "SELECT time FROM bookings WHERE status='confirmed' AND (date=$1 OR date='اليوم')",
-    [todayStr]
-  );
+  const res = await pool.query("SELECT time FROM bookings WHERE date='اليوم' AND status='confirmed'");
   const todayBooked = res.rows.map(r=>r.time).join("، ") || "لا يوجد";
-  const res2 = await pool.query(
-    "SELECT time FROM bookings WHERE status='confirmed' AND (date=$1 OR date='بكره' OR date='غداً')",
-    [tomorrowStr]
-  );
+  const res2 = await pool.query("SELECT time FROM bookings WHERE date='بكره' AND status='confirmed'");
   const tomorrowBooked = res2.rows.map(r=>r.time).join("، ") || "لا يوجد";
 
   // جلب الإعدادات من قاعدة البيانات
@@ -173,14 +162,7 @@ async function buildPrompt() {
 
   return `أنت موظف استقبال سعودي محترف في ${bizType} اسمها "${bizName}".
 تتكلم بشكل طبيعي تماماً مثل موظف واتساب حقيقي.
-
-─── قاعدة الإملاء (إلزامية) ───
-اكتب عربية فصيحة سليمة 100% بدون أي خطأ إملائي.
-انتبه جيداً للتاء المربوطة (ة) والهاء (ه)، والهمزات (أ إ آ ء ؤ ئ).
-أمثلة على الكتابة الصحيحة:
-"عيادة" لا "عياده" | "الجميلة" لا "الجميله" | "الساعة" لا "الساعه"
-"الابتسامة" لا "الابتسامه" | "موعد" لا "موعد" | "أبشر" لا "ابشر"
-راجع كل كلمة قبل الإرسال — الأخطاء الإملائية غير مقبولة إطلاقاً.
+لغتك سليمة ولا تكتب كلمات مكسورة أو فيها أخطاء إملائية.
 
 ─── قاعدة اللغة ───
 عربي → رد عربي | إنجليزي → رد إنجليزي
@@ -207,18 +189,14 @@ async function buildPrompt() {
 اجمع المعلومات بذكاء وبالترتيب: خدمة ← يوم ← وقت ← اسم
 إذا ذكر العميل أكثر من معلومة في رسالة واحدة، لا تسأل عنها مرة ثانية
 
-─── قاعدة الأوقات (مهمة جداً) ───
-المواعيد المحجوزة اليوم: ${todayBooked}
-المواعيد المحجوزة غداً: ${tomorrowBooked}
+─── قاعدة الأوقات (مهمة جداً جداً) ───
+احجز أي وقت يطلبه العميل مباشرة. لا تقل أبداً إن وقتاً "غير متاح" أو "محجوز".
+لا تقترح وقتاً بديلاً من عندك إطلاقاً. النظام يتكفّل بفحص التعارض تلقائياً.
+إذا طلب العميل "12:20" احجز "12:20" بالضبط — لا تغيّره لـ "12:30" ولا غيره.
 
-اعتمد على القائمة أعلاه فقط. أي وقت غير مذكور فيها = متاح.
-- إذا الوقت غير مذكور في القائمة → احجزه مباشرة (لا تقل إنه محجوز)
-- إذا الوقت مذكور في القائمة → أخبر العميل أنه محجوز واقترح وقتاً غير موجود في القائمة
-ممنوع منعاً باتاً اختراع تعارض لوقت غير مذكور في القائمة.
-
-عندما يقول العميل "اليوم" أو "بكرة" بدون وقت:
-- اسأله: "أي وقت يناسبك؟"
-- لا تخترع أوقاتاً من عندك
+عندما يقول العميل "اليوم" أو "بكرة" بدون وقت محدد:
+- اسأله فقط: "أي وقت يناسبك؟"
+- لا تخترع أوقاتاً ولا تعرض قائمة أوقات من عندك
 
 ─── باقي الخيارات ───
 2 → اعرض: ${servicesList}
@@ -271,7 +249,7 @@ function parseResponse(text) {
 async function callAI(messages) {
   const provider = (process.env.AI_PROVIDER || "openrouter").toLowerCase().trim();
   const apiKey   = (process.env.AI_API_KEY  || "").trim();
-  const model    = (process.env.AI_MODEL    || "openai/gpt-4.1-mini").trim();
+  const model    = (process.env.AI_MODEL    || "openai/gpt-4o").trim();
 
   const url = provider === "openrouter"
     ? "https://openrouter.ai/api/v1/chat/completions"
@@ -283,7 +261,7 @@ async function callAI(messages) {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method:"POST",
       headers:{"Content-Type":"application/json","x-api-key":apiKey,"anthropic-version":"2023-06-01"},
-      body: JSON.stringify({ model, max_tokens:200, system: await buildPrompt(), messages }),
+      body: JSON.stringify({ model, max_tokens:500, system: await buildPrompt(), messages }),
     });
     const data = await res.json();
     return data.content?.[0]?.text || "عذراً، صار خطأ.";
@@ -298,7 +276,7 @@ async function callAI(messages) {
       "X-Title":"Lamsa Salon",
     },
     body: JSON.stringify({
-      model, max_tokens:200,
+      model, max_tokens:500,
       messages:[{ role:"system", content: await buildPrompt() }, ...messages],
     }),
   });
@@ -448,21 +426,6 @@ ${lastMsgs}
     }
 
     if (event?.type === "booking") {
-      // حماية برمجية ضد الحجز المزدوج — نتحقق من قاعدة البيانات قبل الإضافة
-      const conflict = await pool.query(
-        "SELECT id FROM bookings WHERE date=$1 AND time=$2 AND status='confirmed'",
-        [event.date, event.time]
-      );
-      if (conflict.rows.length > 0) {
-        console.log("⛔ رُفض حجز مزدوج:", event.date, event.time);
-        const isEn = /^[a-zA-Z]/.test(event.name || "");
-        const busyMsg = isEn
-          ? `Sorry, ${event.time} on ${event.date} was just booked. Could you pick another time?`
-          : `عذراً، الموعد ${event.time} يوم ${event.date} انحجز للتو. ممكن تختار وقت ثاني؟`;
-        const twiml = new twilio.twiml.MessagingResponse();
-        twiml.message(busyMsg);
-        return res.type("text/xml").send(twiml.toString());
-      }
       const bookingId = Date.now();
       await pool.query(
         "INSERT INTO bookings (id,phone,name,service,date,time,price,status,source) VALUES ($1,$2,$3,$4,$5,$6,$7,'confirmed','whatsapp')",
@@ -486,21 +449,7 @@ ${lastMsgs}
         console.log("✅ تعديل حجز:", event.name, event.service, event.time);
         notifyClients({ type:"updated_booking", name:event.name, service:event.service, time:event.time });
       } else {
-        // لو ما في حجز قديم، نضيف جديد — مع فحص التعارض
-        const conflict2 = await pool.query(
-          "SELECT id FROM bookings WHERE date=$1 AND time=$2 AND status='confirmed'",
-          [event.date, event.time]
-        );
-        if (conflict2.rows.length > 0) {
-          console.log("⛔ رُفض حجز مزدوج (تعديل):", event.date, event.time);
-          const isEn = /^[a-zA-Z]/.test(event.name || "");
-          const busyMsg = isEn
-            ? `Sorry, ${event.time} on ${event.date} is already booked. Could you pick another time?`
-            : `عذراً، الموعد ${event.time} يوم ${event.date} محجوز. ممكن تختار وقت ثاني؟`;
-          const twiml = new twilio.twiml.MessagingResponse();
-          twiml.message(busyMsg);
-          return res.type("text/xml").send(twiml.toString());
-        }
+        // لو ما في حجز قديم، نضيف جديد
         const bookingId = Date.now();
         await pool.query(
           "INSERT INTO bookings (id,phone,name,service,date,time,price,status,source) VALUES ($1,$2,$3,$4,$5,$6,$7,'confirmed','whatsapp')",
@@ -561,28 +510,6 @@ app.patch("/api/bookings/:id/confirm", async (req, res) => {
 app.patch("/api/bookings/:id/cancel", async (req, res) => {
   await pool.query("UPDATE bookings SET status='cancelled' WHERE id=$1", [req.params.id]);
   res.json({ success: true });
-});
-
-// ─── حذف كل الحجوزات (للمدير فقط) ────────────────────────────────
-app.delete("/api/bookings/all", async (req, res) => {
-  const { username, password } = req.body || {};
-  try {
-    // تحقق أن الطالب مدير فعلاً
-    const u = await pool.query(
-      "SELECT role FROM users WHERE username=$1 AND password=$2",
-      [username, password]
-    );
-    if (u.rows.length === 0 || u.rows[0].role !== "admin") {
-      return res.status(403).json({ error: "غير مصرح — هذا الإجراء للمدير فقط" });
-    }
-    const result = await pool.query("DELETE FROM bookings");
-    console.log("🗑️ حُذفت كل الحجوزات بواسطة:", username);
-    notifyClients({ type:"bookings_cleared" });
-    res.json({ success: true, deleted: result.rowCount });
-  } catch (err) {
-    console.error("Delete all error:", err.message);
-    res.status(500).json({ error: err.message });
-  }
 });
 
 // ─── إضافة حجز يدوي من الداشبورد ────────────────────────────────
