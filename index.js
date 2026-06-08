@@ -293,14 +293,46 @@ function toAmPm(h24, m) {
   return `${h}:${String(m).padStart(2,"0")} ${period}`;
 }
 
-// هل هذا الوقت محجوز في هذا التاريخ؟
+// توحيد صيغة التاريخ: يشيل اسم اليوم ويحوّل "اليوم/بكرة" لتاريخ فعلي
+// النتيجة دائماً "D شهر YYYY" (مثال: "8 يونيو 2026")
+function normalizeDate(dateStr) {
+  if (!dateStr) return "";
+  const arabicDays   = ["الأحد","الاثنين","الإثنين","الثلاثاء","الأربعاء","الخميس","الجمعة","السبت"];
+  const arabicMonths = ["يناير","فبراير","مارس","أبريل","مايو","يونيو","يوليو","أغسطس","سبتمبر","أكتوبر","نوفمبر","ديسمبر"];
+  const fmt = d => d.getDate()+" "+arabicMonths[d.getMonth()]+" "+d.getFullYear();
+
+  let s = dateStr.trim();
+  const low = s.toLowerCase();
+
+  // كلمات نسبية → تاريخ فعلي
+  if (s === "اليوم" || low === "today") {
+    return fmt(new Date());
+  }
+  if (s === "بكره" || s === "بكرة" || s === "غداً" || s === "غدا" || low === "tomorrow") {
+    const t = new Date(); t.setDate(t.getDate()+1); return fmt(t);
+  }
+
+  // شيل اسم اليوم لو موجود في البداية
+  for (const day of arabicDays) {
+    if (s.startsWith(day)) { s = s.slice(day.length).trim(); break; }
+  }
+  // شيل الفاصلة أو "،" لو بقت
+  s = s.replace(/^[،,]\s*/, "").trim();
+  return s;
+}
+
+// هل هذا الوقت محجوز في هذا التاريخ؟ (مقارنة بعد التوحيد)
 async function isSlotTaken(date, time, excludeId=null) {
-  const q = excludeId
-    ? "SELECT id FROM bookings WHERE date=$1 AND time=$2 AND status='confirmed' AND id<>$3"
-    : "SELECT id FROM bookings WHERE date=$1 AND time=$2 AND status='confirmed'";
-  const params = excludeId ? [date, time, excludeId] : [date, time];
-  const r = await pool.query(q, params);
-  return r.rows.length > 0;
+  const targetDate = normalizeDate(date);
+  const targetTime = (time||"").trim();
+  // نجيب كل الحجوزات المؤكدة بنفس الوقت ونقارن التاريخ بعد التوحيد
+  const r = await pool.query(
+    "SELECT id, date FROM bookings WHERE status='confirmed' AND TRIM(time)=$1",
+    [targetTime]
+  );
+  return r.rows.some(row =>
+    normalizeDate(row.date) === targetDate && String(row.id) !== String(excludeId)
+  );
 }
 
 // يبحث عن أقرب وقت متاح بعد الوقت المطلوب (بفواصل 30 دقيقة)
@@ -417,6 +449,11 @@ app.post("/webhook", async (req, res) => {
 
     const rawText          = await callAI(messages);
     const { clean, event } = parseResponse(rawText);
+    // توحيد صيغة التاريخ والوقت لكل حجز/تعديل (مصدر واحد للحقيقة)
+    if (event && (event.type === "booking" || event.type === "update")) {
+      event.date = normalizeDate(event.date);
+      event.time = (event.time || "").trim();
+    }
     messages.push({ role:"assistant", content:rawText });
     await saveSession(from, messages);
 
