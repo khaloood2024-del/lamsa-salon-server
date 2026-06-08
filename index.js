@@ -208,11 +208,13 @@ async function buildPrompt() {
 اليوم: ${fmt(today)} | غداً: ${fmt(tomorrow)}
 الدوام: ${bizHours}
 
-─── قاعدة الوقت ───
-حوّل الوقت دائماً لـ AM/PM في الـ tag:
-الظهر = 12:00 PM | العصر = 4:00 PM | 9 الصبح = 9:00 AM | 8 الليل = 8:00 PM
-في رسالتك للعميل: اكتب الوقت بالعربي
-في الـ tag: AM/PM فقط
+─── قاعدة الوقت (مهمة) ───
+اكتب الوقت دائماً بصيغة AM/PM في كل مكان: في رسالتك للعميل وفي الـ tag.
+ممنوع تكتب "ظهراً" أو "عصراً" أو "مساءً" — استخدم AM/PM فقط.
+حوّل كلام العميل لـ AM/PM:
+الظهر = 12:00 PM | 1 وربع الظهر = 1:15 PM | العصر = 4:00 PM | 9 الصبح = 9:00 AM | 8 الليل = 8:00 PM
+مثال رسالة صحيحة: "تم حجز موعدك اليوم الساعة 1:15 PM"
+مثال خاطئ: "تم حجز موعدك الساعة 1:15 ظهراً"
 
 ─── Tags (في نهاية الرد) ───
 ما تؤكد الحجز إلا بعد: الخدمة + التاريخ + الوقت + الاسم
@@ -348,6 +350,24 @@ async function findNextFreeSlot(date, time) {
     if (!(await isSlotTaken(date, candidate))) return candidate;
   }
   return null;
+}
+
+// ضمانة: تحوّل أي وقت بصيغة عربية (1:15 ظهراً / 4 عصراً) إلى AM/PM
+// تُطبّق على رسالة الـ AI الخارجة حتى لو زلّ وكتب بالعربي
+function arabicTimeToAmPm(text) {
+  if (!text) return text;
+  const pmWords = ["ظهراً","ظهرا","الظهر","عصراً","عصرا","العصر","مساءً","مساء","المساء","الليل","ليلاً","ليلا","المغرب","مغرباً"];
+  const amWords = ["صباحاً","صباحا","الصبح","الصباح","فجراً","فجرا","الفجر"];
+  // نمط: رقم[:دقائق] متبوع بكلمة فترة عربية
+  const re = /(\d{1,2})(?::(\d{2}))?\s*(ظهراً|ظهرا|الظهر|عصراً|عصرا|العصر|مساءً|مساء|المساء|الليل|ليلاً|ليلا|المغرب|مغرباً|صباحاً|صباحا|الصبح|الصباح|فجراً|فجرا|الفجر)/g;
+  return text.replace(re, (m, h, min, word) => {
+    let hour = parseInt(h);
+    const mins = min || "00";
+    const isPM = pmWords.includes(word);
+    // 12 ظهراً تبقى 12 PM، و12 صباحاً تبقى 12 AM
+    const period = isPM ? "PM" : "AM";
+    return `${hour}:${mins} ${period}`;
+  });
 }
 
 // ─── Webhook ──────────────────────────────────────────────────────
@@ -566,7 +586,7 @@ ${lastMsgs}
     }
 
     const twiml = new twilio.twiml.MessagingResponse();
-    twiml.message(clean);
+    twiml.message(arabicTimeToAmPm(clean));
     res.type("text/xml").send(twiml.toString());
 
   } catch (err) {
