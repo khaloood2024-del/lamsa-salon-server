@@ -385,6 +385,43 @@ function arabicTimeToAmPm(text) {
   });
 }
 
+// يطابق اسم الخدمة اللي كتبه الـ AI مع الاسم الرسمي في قاعدة البيانات
+// يرجّع الاسم العربي الرسمي مهما كتب الـ AI (Dental → أسنان)
+async function matchService(rawName) {
+  if (!rawName) return rawName;
+  const input = String(rawName).trim().toLowerCase();
+  const r = await pool.query("SELECT name FROM services");
+  if (r.rows.length === 0) return rawName;
+
+  // مرادفات إنجليزية شائعة → نطابقها مع الخدمة المناسبة بالكلمات المفتاحية
+  const synonyms = {
+    "dental": "أسنان", "dentist": "أسنان", "teeth": "أسنان", "tooth": "أسنان",
+    "ophthalmology": "عيون", "eye": "عيون", "eyes": "عيون", "optical": "عيون",
+    "internal medicine": "باطنية", "internal": "باطنية",
+    "dermatology": "جلدية", "skin": "جلدية",
+    "hair": "شعر", "haircut": "شعر",
+  };
+
+  // 1) تطابق مباشر مع اسم خدمة موجود
+  for (const row of r.rows) {
+    if (row.name.trim().toLowerCase() === input) return row.name;
+  }
+  // 2) تطابق عبر المرادفات: لو المدخل مرادف، دوّر خدمة تحتوي الكلمة العربية
+  for (const [en, ar] of Object.entries(synonyms)) {
+    if (input.includes(en)) {
+      const found = r.rows.find(row => row.name.includes(ar));
+      if (found) return found.name;
+    }
+  }
+  // 3) تطابق جزئي: اسم خدمة يحتوي المدخل أو العكس
+  for (const row of r.rows) {
+    const n = row.name.trim().toLowerCase();
+    if (n.includes(input) || input.includes(n)) return row.name;
+  }
+  // 4) ما لقينا تطابق → رجّع كما هو
+  return rawName;
+}
+
 // ─── Webhook ──────────────────────────────────────────────────────
 app.post("/webhook", async (req, res) => {
   const from = req.body.From;
@@ -484,10 +521,11 @@ app.post("/webhook", async (req, res) => {
 
     const rawText          = await callAI(messages);
     const { clean, event } = parseResponse(rawText);
-    // توحيد صيغة التاريخ والوقت لكل حجز/تعديل (مصدر واحد للحقيقة)
+    // توحيد صيغة التاريخ والوقت والخدمة لكل حجز/تعديل (مصدر واحد للحقيقة)
     if (event && (event.type === "booking" || event.type === "update")) {
       event.date = normalizeDate(event.date);
       event.time = (event.time || "").trim();
+      event.service = await matchService(event.service);
     }
     messages.push({ role:"assistant", content:rawText });
     await saveSession(from, messages);
