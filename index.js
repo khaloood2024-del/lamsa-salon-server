@@ -164,8 +164,10 @@ async function buildPrompt() {
 تتكلم بشكل طبيعي تماماً مثل موظف واتساب حقيقي.
 لغتك سليمة ولا تكتب كلمات مكسورة أو فيها أخطاء إملائية.
 
-─── قاعدة اللغة ───
-عربي → رد عربي | إنجليزي → رد إنجليزي
+─── قاعدة اللغة (مهمة) ───
+طابق لغة العميل في كل رد. إذا كتب العميل بالإنجليزي، رد بالإنجليزي فقط حتى الكلمات القصيرة مثل "thanks" أو "ok".
+إذا كانت المحادثة كلها إنجليزي، لا ترد بالعربي أبداً حتى لو كانت رسالة شكر بسيطة.
+عربي → رد عربي بالكامل | إنجليزي → رد إنجليزي بالكامل
 
 ─── أسلوب التعامل ───
 استخدم كلمات طبيعية: حياك، تمام، ممتاز، أبشر، زين
@@ -189,14 +191,18 @@ async function buildPrompt() {
 اجمع المعلومات بذكاء وبالترتيب: خدمة ← يوم ← وقت ← اسم
 إذا ذكر العميل أكثر من معلومة في رسالة واحدة، لا تسأل عنها مرة ثانية
 
-─── قاعدة الأوقات (مهمة جداً جداً) ───
-احجز أي وقت يطلبه العميل مباشرة. لا تقل أبداً إن وقتاً "غير متاح" أو "محجوز".
-لا تقترح وقتاً بديلاً من عندك إطلاقاً. النظام يتكفّل بفحص التعارض تلقائياً.
-إذا طلب العميل "12:20" احجز "12:20" بالضبط — لا تغيّره لـ "12:30" ولا غيره.
+─── قاعدة الأوقات (مهمة جداً) ───
+المواعيد المحجوزة اليوم: ${todayBooked}
+المواعيد المحجوزة غداً: ${tomorrowBooked}
 
-عندما يقول العميل "اليوم" أو "بكرة" بدون وقت محدد:
-- اسأله فقط: "أي وقت يناسبك؟"
-- لا تخترع أوقاتاً ولا تعرض قائمة أوقات من عندك
+عندما يطلب العميل وقتاً:
+- إذا الوقت غير محجوز → احجزه مباشرة
+- إذا الوقت محجوز → أخبره وقترح بديلاً قريباً منه
+  مثال صحيح: "هذا الوقت محجوز، يتوفر لدينا 1:30 PM أو 2:30 PM، أيهما يناسبك؟"
+
+عندما يقول العميل "اليوم" أو "بكرة" بدون وقت:
+- اسأله: "أي وقت يناسبك؟"
+- لا تخترع أوقاتاً من عندك
 
 ─── باقي الخيارات ───
 2 → اعرض: ${servicesList}
@@ -208,13 +214,11 @@ async function buildPrompt() {
 اليوم: ${fmt(today)} | غداً: ${fmt(tomorrow)}
 الدوام: ${bizHours}
 
-─── قاعدة الوقت (مهمة) ───
-اكتب الوقت دائماً بصيغة AM/PM في كل مكان: في رسالتك للعميل وفي الـ tag.
-ممنوع تكتب "ظهراً" أو "عصراً" أو "مساءً" — استخدم AM/PM فقط.
-حوّل كلام العميل لـ AM/PM:
-الظهر = 12:00 PM | 1 وربع الظهر = 1:15 PM | العصر = 4:00 PM | 9 الصبح = 9:00 AM | 8 الليل = 8:00 PM
-مثال رسالة صحيحة: "تم حجز موعدك اليوم الساعة 1:15 PM"
-مثال خاطئ: "تم حجز موعدك الساعة 1:15 ظهراً"
+─── قاعدة الوقت ───
+حوّل الوقت دائماً لـ AM/PM في الـ tag:
+الظهر = 12:00 PM | العصر = 4:00 PM | 9 الصبح = 9:00 AM | 8 الليل = 8:00 PM
+في رسالتك للعميل: اكتب الوقت بالعربي
+في الـ tag: AM/PM فقط
 
 ─── Tags (في نهاية الرد) ───
 ما تؤكد الحجز إلا بعد: الخدمة + التاريخ + الوقت + الاسم
@@ -251,7 +255,7 @@ function parseResponse(text) {
 async function callAI(messages) {
   const provider = (process.env.AI_PROVIDER || "openrouter").toLowerCase().trim();
   const apiKey   = (process.env.AI_API_KEY  || "").trim();
-  const model    = (process.env.AI_MODEL    || "openai/gpt-4o").trim();
+  const model    = (process.env.AI_MODEL    || "openai/gpt-4.1-mini").trim();
 
   const url = provider === "openrouter"
     ? "https://openrouter.ai/api/v1/chat/completions"
@@ -263,7 +267,7 @@ async function callAI(messages) {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method:"POST",
       headers:{"Content-Type":"application/json","x-api-key":apiKey,"anthropic-version":"2023-06-01"},
-      body: JSON.stringify({ model, max_tokens:500, system: await buildPrompt(), messages }),
+      body: JSON.stringify({ model, max_tokens:200, system: await buildPrompt(), messages }),
     });
     const data = await res.json();
     return data.content?.[0]?.text || "عذراً، صار خطأ.";
@@ -278,96 +282,13 @@ async function callAI(messages) {
       "X-Title":"Lamsa Salon",
     },
     body: JSON.stringify({
-      model, max_tokens:500,
+      model, max_tokens:200,
       messages:[{ role:"system", content: await buildPrompt() }, ...messages],
     }),
   });
   const data = await res.json();
   if (data.error) { console.error("AI ERROR:", data.error); return "عذراً، صار خطأ."; }
   return data.choices?.[0]?.message?.content || "عذراً، صار خطأ.";
-}
-
-// ─── فحص التعارض واقتراح وقت بديل ──────────────────────────────────
-// تحويل (ساعة 24، دقيقة) إلى صيغة "H:MM AM/PM"
-function toAmPm(h24, m) {
-  const period = h24 >= 12 ? "PM" : "AM";
-  let h = h24 % 12; if (h === 0) h = 12;
-  return `${h}:${String(m).padStart(2,"0")} ${period}`;
-}
-
-// توحيد صيغة التاريخ: يشيل اسم اليوم ويحوّل "اليوم/بكرة" لتاريخ فعلي
-// النتيجة دائماً "D شهر YYYY" (مثال: "8 يونيو 2026")
-function normalizeDate(dateStr) {
-  if (!dateStr) return "";
-  const arabicDays   = ["الأحد","الاثنين","الإثنين","الثلاثاء","الأربعاء","الخميس","الجمعة","السبت"];
-  const arabicMonths = ["يناير","فبراير","مارس","أبريل","مايو","يونيو","يوليو","أغسطس","سبتمبر","أكتوبر","نوفمبر","ديسمبر"];
-  const fmt = d => d.getDate()+" "+arabicMonths[d.getMonth()]+" "+d.getFullYear();
-
-  let s = dateStr.trim();
-  const low = s.toLowerCase();
-
-  // كلمات نسبية → تاريخ فعلي
-  if (s === "اليوم" || low === "today") {
-    return fmt(new Date());
-  }
-  if (s === "بكره" || s === "بكرة" || s === "غداً" || s === "غدا" || low === "tomorrow") {
-    const t = new Date(); t.setDate(t.getDate()+1); return fmt(t);
-  }
-
-  // شيل اسم اليوم لو موجود في البداية
-  for (const day of arabicDays) {
-    if (s.startsWith(day)) { s = s.slice(day.length).trim(); break; }
-  }
-  // شيل الفاصلة أو "،" لو بقت
-  s = s.replace(/^[،,]\s*/, "").trim();
-  return s;
-}
-
-// هل هذا الوقت محجوز في هذا التاريخ؟ (مقارنة بعد التوحيد)
-async function isSlotTaken(date, time, excludeId=null) {
-  const targetDate = normalizeDate(date);
-  const targetTime = (time||"").trim();
-  // نجيب كل الحجوزات المؤكدة بنفس الوقت ونقارن التاريخ بعد التوحيد
-  const r = await pool.query(
-    "SELECT id, date FROM bookings WHERE status='confirmed' AND TRIM(time)=$1",
-    [targetTime]
-  );
-  return r.rows.some(row =>
-    normalizeDate(row.date) === targetDate && String(row.id) !== String(excludeId)
-  );
-}
-
-// يبحث عن أقرب وقت متاح بعد الوقت المطلوب (بفواصل 30 دقيقة)
-async function findNextFreeSlot(date, time) {
-  const parsed = parseTimeToHour24(time);
-  if (!parsed) return null;
-  let total = parsed.h * 60 + parsed.m;
-  for (let i = 0; i < 16; i++) {       // نجرّب حتى 8 ساعات قدام
-    total += 30;
-    const h = Math.floor(total / 60) % 24;
-    const m = total % 60;
-    const candidate = toAmPm(h, m);
-    if (!(await isSlotTaken(date, candidate))) return candidate;
-  }
-  return null;
-}
-
-// ضمانة: تحوّل أي وقت بصيغة عربية (1:15 ظهراً / 4 عصراً) إلى AM/PM
-// تُطبّق على رسالة الـ AI الخارجة حتى لو زلّ وكتب بالعربي
-function arabicTimeToAmPm(text) {
-  if (!text) return text;
-  const pmWords = ["ظهراً","ظهرا","الظهر","عصراً","عصرا","العصر","مساءً","مساء","المساء","الليل","ليلاً","ليلا","المغرب","مغرباً"];
-  const amWords = ["صباحاً","صباحا","الصبح","الصباح","فجراً","فجرا","الفجر"];
-  // نمط: رقم[:دقائق] متبوع بكلمة فترة عربية
-  const re = /(\d{1,2})(?::(\d{2}))?\s*(ظهراً|ظهرا|الظهر|عصراً|عصرا|العصر|مساءً|مساء|المساء|الليل|ليلاً|ليلا|المغرب|مغرباً|صباحاً|صباحا|الصبح|الصباح|فجراً|فجرا|الفجر)/g;
-  return text.replace(re, (m, h, min, word) => {
-    let hour = parseInt(h);
-    const mins = min || "00";
-    const isPM = pmWords.includes(word);
-    // 12 ظهراً تبقى 12 PM، و12 صباحاً تبقى 12 AM
-    const period = isPM ? "PM" : "AM";
-    return `${hour}:${mins} ${period}`;
-  });
 }
 
 // ─── Webhook ──────────────────────────────────────────────────────
@@ -469,11 +390,6 @@ app.post("/webhook", async (req, res) => {
 
     const rawText          = await callAI(messages);
     const { clean, event } = parseResponse(rawText);
-    // توحيد صيغة التاريخ والوقت لكل حجز/تعديل (مصدر واحد للحقيقة)
-    if (event && (event.type === "booking" || event.type === "update")) {
-      event.date = normalizeDate(event.date);
-      event.time = (event.time || "").trim();
-    }
     messages.push({ role:"assistant", content:rawText });
     await saveSession(from, messages);
 
@@ -516,25 +432,6 @@ ${lastMsgs}
     }
 
     if (event?.type === "booking") {
-      // فحص التعارض في قاعدة البيانات قبل أي حجز
-      if (await isSlotTaken(event.date, event.time)) {
-        console.log("⛔ تعارض حجز:", event.date, event.time);
-        const isEn = /^[a-zA-Z]/.test(event.name || "");
-        const free = await findNextFreeSlot(event.date, event.time);
-        const busyMsg = isEn
-          ? (free
-              ? `Sorry, ${event.time} is already booked. The nearest available time is ${free}. Does that work?`
-              : `Sorry, ${event.time} is already booked. Could you pick another time?`)
-          : (free
-              ? `عذراً، الوقت ${event.time} محجوز. أقرب وقت متاح هو ${free}، يناسبك؟`
-              : `عذراً، الوقت ${event.time} محجوز. ممكن تختار وقت ثاني؟`);
-        // نصحّح الجلسة حتى لا يظن الـ AI أن الحجز تم
-        messages.push({ role:"system", content:`النظام رفض الحجز: الوقت ${event.time} محجوز مسبقاً. لم يتم الحجز. اطلب من العميل وقتاً آخر${free?` (مثل ${free})`:""}.` });
-        await saveSession(from, messages);
-        const twiml = new twilio.twiml.MessagingResponse();
-        twiml.message(busyMsg);
-        return res.type("text/xml").send(twiml.toString());
-      }
       const bookingId = Date.now();
       await pool.query(
         "INSERT INTO bookings (id,phone,name,service,date,time,price,status,source) VALUES ($1,$2,$3,$4,$5,$6,$7,'confirmed','whatsapp')",
@@ -550,23 +447,6 @@ ${lastMsgs}
         "SELECT id FROM bookings WHERE phone=$1 AND status='confirmed' ORDER BY id DESC LIMIT 1",
         [from]
       );
-      // فحص التعارض مع حجوزات الآخرين (نستثني حجز العميل نفسه)
-      const excludeId = existing.rows[0]?.id || null;
-      if (await isSlotTaken(event.date, event.time, excludeId)) {
-        console.log("⛔ تعارض تعديل:", event.date, event.time);
-        const isEn = /^[a-zA-Z]/.test(event.name || "");
-        const free = await findNextFreeSlot(event.date, event.time);
-        const busyMsg = isEn
-          ? (free ? `Sorry, ${event.time} is already booked. The nearest available time is ${free}. Does that work?`
-                  : `Sorry, ${event.time} is already booked. Could you pick another time?`)
-          : (free ? `عذراً، الوقت ${event.time} محجوز. أقرب وقت متاح هو ${free}، يناسبك؟`
-                  : `عذراً، الوقت ${event.time} محجوز. ممكن تختار وقت ثاني؟`);
-        messages.push({ role:"system", content:`النظام رفض التعديل: الوقت ${event.time} محجوز مسبقاً. اطلب من العميل وقتاً آخر${free?` (مثل ${free})`:""}.` });
-        await saveSession(from, messages);
-        const twiml = new twilio.twiml.MessagingResponse();
-        twiml.message(busyMsg);
-        return res.type("text/xml").send(twiml.toString());
-      }
       if (existing.rows.length > 0) {
         await pool.query(
           "UPDATE bookings SET service=$1,date=$2,time=$3,price=$4 WHERE id=$5",
@@ -586,7 +466,7 @@ ${lastMsgs}
     }
 
     const twiml = new twilio.twiml.MessagingResponse();
-    twiml.message(arabicTimeToAmPm(clean));
+    twiml.message(clean);
     res.type("text/xml").send(twiml.toString());
 
   } catch (err) {
@@ -713,11 +593,11 @@ async function sendReminders() {
         } catch (err) { console.error("Reminder day error:", err.message); }
       }
 
-      // تذكير قبل ساعة — يرسل لو الحجز اليوم وبعد 50-70 دقيقة
+      // تذكير قبل ساعة — يرسل لو الحجز اليوم وضمن نافذة 57-63 دقيقة (قريب من ساعة بالضبط)
       if (!b.reminded_hour && isBookingToday) {
         const diffMin = (apptUTC - now) / (1000 * 60);
         console.log(`⏰ فحص تذكير ساعة ${b.name}: الفرق ${Math.round(diffMin)} دقيقة`);
-        if (diffMin >= 30 && diffMin <= 90) {
+        if (diffMin >= 57 && diffMin <= 63) {
           const ar = `تذكير: موعدك "${b.service}" بعد ساعة الساعة ${b.time} في ${bizName} 🕐`;
           const en = `Reminder: your "${b.service}" appointment is in 1 hour at ${b.time} at ${bizName} 🕐`;
           try {
@@ -851,8 +731,8 @@ async function sendReviews() {
 }
 
 // شغّل كل 30 دقيقة
-setInterval(sendReminders, 30 * 60 * 1000);
-setInterval(sendReviews,   30 * 60 * 1000);
+setInterval(sendReminders, 3 * 60 * 1000);
+setInterval(sendReviews,   15 * 60 * 1000);
 
 // شغّل مرة عند بدء السيرفر (بعد 10 ثواني)
 setTimeout(()=>{ sendReminders(); sendReviews(); }, 10000);
