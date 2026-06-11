@@ -387,35 +387,45 @@ function arabicTimeToAmPm(text) {
 
 // يطابق اسم الخدمة اللي كتبه الـ AI مع الاسم الرسمي في قاعدة البيانات
 // يرجّع الاسم العربي الرسمي مهما كتب الـ AI (Dental → أسنان)
+// يتجاهل اختلاف الهمزات (أ/إ/آ/ا) والتاء المربوطة عشان المطابقة تكون دقيقة
+function normalizeArabic(str) {
+  return String(str).trim().toLowerCase()
+    .replace(/[أإآ]/g, "ا")   // كل أشكال الهمزة على الألف → ألف عادية
+    .replace(/ى/g, "ي")        // ألف مقصورة → ياء
+    .replace(/ة/g, "ه")        // تاء مربوطة → هاء
+    .replace(/\s+/g, " ");     // توحيد المسافات
+}
+
 async function matchService(rawName) {
   if (!rawName) return rawName;
-  const input = String(rawName).trim().toLowerCase();
+  const input = normalizeArabic(rawName);
   const r = await pool.query("SELECT name FROM services");
   if (r.rows.length === 0) return rawName;
 
-  // مرادفات إنجليزية شائعة → نطابقها مع الخدمة المناسبة بالكلمات المفتاحية
+  // مرادفات إنجليزية شائعة → الكلمة العربية المقابلة
   const synonyms = {
-    "dental": "أسنان", "dentist": "أسنان", "teeth": "أسنان", "tooth": "أسنان",
+    "dental": "اسنان", "dentist": "اسنان", "teeth": "اسنان", "tooth": "اسنان",
     "ophthalmology": "عيون", "eye": "عيون", "eyes": "عيون", "optical": "عيون",
-    "internal medicine": "باطنية", "internal": "باطنية",
-    "dermatology": "جلدية", "skin": "جلدية",
+    "internal medicine": "باطنيه", "internal": "باطنيه",
+    "dermatology": "جلديه", "skin": "جلديه",
     "hair": "شعر", "haircut": "شعر",
   };
 
-  // 1) تطابق مباشر مع اسم خدمة موجود
+  // 1) تطابق مباشر (بعد تجاهل الهمزات)
   for (const row of r.rows) {
-    if (row.name.trim().toLowerCase() === input) return row.name;
+    if (normalizeArabic(row.name) === input) return row.name;
   }
-  // 2) تطابق عبر المرادفات: لو المدخل مرادف، دوّر خدمة تحتوي الكلمة العربية
+  // 2) تطابق عبر المرادفات: لو المدخل مرادف، دوّر خدمة تطابق الكلمة العربية
   for (const [en, ar] of Object.entries(synonyms)) {
     if (input.includes(en)) {
-      const found = r.rows.find(row => row.name.includes(ar));
+      const arNorm = normalizeArabic(ar);
+      const found = r.rows.find(row => normalizeArabic(row.name).includes(arNorm));
       if (found) return found.name;
     }
   }
-  // 3) تطابق جزئي: اسم خدمة يحتوي المدخل أو العكس
+  // 3) تطابق جزئي (بعد التجاهل)
   for (const row of r.rows) {
-    const n = row.name.trim().toLowerCase();
+    const n = normalizeArabic(row.name);
     if (n.includes(input) || input.includes(n)) return row.name;
   }
   // 4) ما لقينا تطابق → رجّع كما هو
