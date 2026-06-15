@@ -1,19 +1,80 @@
 import express from "express";
 import twilio from "twilio";
 import pg from "pg";
+import jwt from "jsonwebtoken";
+import bcrypt from "bcryptjs";
+import rateLimit from "express-rate-limit";
 
 const app = express();
+// Railway/Vercel خلف بروكسي — ضروري عشان rate-limit يقرأ IP الحقيقي
+app.set("trust proxy", 1);
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
-// السماح للداشبورد بالوصول
+// ─── سرّ توقيع الـ JWT (مطلوب) ───────────────────────────────────
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  console.error("❌ JWT_SECRET غير مضبوط في متغيرات البيئة. أوقف التشغيل.");
+  process.exit(1);
+}
+
+// ─── CORS: نطاقات محددة فقط (مو * للجميع) ─────────────────────────
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
+  .split(",").map(s => s.trim()).filter(Boolean);
 app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "*");
+  const origin = req.headers.origin;
+  if (origin && ALLOWED_ORIGINS.includes(origin)) {
+    res.header("Access-Control-Allow-Origin", origin);
+    res.header("Vary", "Origin");
+  }
   res.header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
   if (req.method === "OPTIONS") return res.sendStatus(200);
   next();
 });
+
+// ─── المصادقة والصلاحيات ──────────────────────────────────────────
+function auth(req, res, next) {
+  const h = req.headers.authorization || "";
+  const token = h.startsWith("Bearer ") ? h.slice(7) : null;
+  if (!token) return res.status(401).json({ error: "مطلوب تسجيل الدخول" });
+  try { req.user = jwt.verify(token, JWT_SECRET); next(); }
+  catch { return res.status(401).json({ error: "انتهت الجلسة، سجّل الدخول من جديد" }); }
+}
+function adminOnly(req, res, next) {
+  if (req.user?.role !== "admin")
+    return res.status(403).json({ error: "هذا الإجراء للمدير فقط" });
+  next();
+}
+
+// ─── Rate limiting ────────────────────────────────────────────────
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, max: 10,
+  standardHeaders: true, legacyHeaders: false,
+  message: { error: "محاولات تسجيل دخول كثيرة، حاول بعد 15 دقيقة" },
+});
+const webhookLimiter = rateLimit({
+  windowMs: 60 * 1000, max: 60,
+  standardHeaders: true, legacyHeaders: false,
+});
+
+// ─── التحقق من توقيع تويليو على الـ webhook ───────────────────────
+function validateTwilio(req, res, next) {
+  // مسموح تعطيله محلياً فقط أثناء التطوير (لا تستخدمه في الإنتاج)
+  if (process.env.SKIP_TWILIO_VALIDATION === "true") return next();
+  const signature = req.headers["x-twilio-signature"];
+  const base = process.env.PUBLIC_URL
+    || `https://${req.headers["x-forwarded-host"] || req.headers.host}`;
+  const url = base + req.originalUrl;
+  const valid = twilio.validateRequest(
+    process.env.TWILIO_AUTH_TOKEN, signature, url, req.body || {}
+  );
+  if (!valid) {
+    console.warn("[WEBHOOK] ❌ توقيع تويليو غير صالح — تم الرفض");
+    return res.status(403).send("Forbidden");
+  }
+  next();
+}
 
 const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
@@ -97,17 +158,21 @@ async function initDB() {
       created_at TIMESTAMP DEFAULT NOW()
     );
   `);
-  // أنشئ حساب المدير الافتراضي لو ما عنده
-  await pool.query(`
-    INSERT INTO users (username, password, role)
-    VALUES ('مدير', 'admin2026', 'admin')
-    ON CONFLICT (username) DO NOTHING
-  `);
-  await pool.query(`
-    INSERT INTO users (username, password, role)
-    VALUES ('موظفة', 'lamsa2026', 'staff')
-    ON CONFLICT (username) DO NOTHING
-  `);
+  // أنشئ الحسابات الافتراضية لو ما عندها (كلمات المرور مشفّرة)
+  const adminPwd = process.env.DEFAULT_ADMIN_PASSWORD || "admin2026";
+  const staffPwd = process.env.DEFAULT_STAFF_PASSWORD || "lamsa2026";
+  if (!process.env.DEFAULT_ADMIN_PASSWORD)
+    console.warn("⚠️ DEFAULT_ADMIN_PASSWORD غير مضبوط — تستخدم كلمة مرور افتراضية، غيّرها فوراً.");
+  const adminHash = await bcrypt.hash(adminPwd, 10);
+  const staffHash = await bcrypt.hash(staffPwd, 10);
+  await pool.query(
+    `INSERT INTO users (username, password, role) VALUES ($1, $2, 'admin')
+     ON CONFLICT (username) DO NOTHING`, ["مدير", adminHash]
+  );
+  await pool.query(
+    `INSERT INTO users (username, password, role) VALUES ($1, $2, 'staff')
+     ON CONFLICT (username) DO NOTHING`, ["موظفة", staffHash]
+  );
   console.log("✅ DB جاهز");
 }
 
@@ -433,7 +498,7 @@ async function matchService(rawName) {
 }
 
 // ─── Webhook ──────────────────────────────────────────────────────
-app.post("/webhook", async (req, res) => {
+app.post("/webhook", webhookLimiter, validateTwilio, async (req, res) => {
   const from = req.body.From;
   const body = req.body.Body?.trim();
   if (!from || !body) return res.sendStatus(200);
@@ -660,12 +725,21 @@ ${lastMsgs}
   }
 });
 
+// ─── بوابة المصادقة لكل /api (ما عدا تسجيل الدخول والـ SSE) ───────
+app.use("/api", (req, res, next) => {
+  if (req.path === "/login")  return next();   // تسجيل الدخول عام (محدود بمعدل)
+  if (req.path === "/events") return next();   // الـ SSE يتحقق من التوكن داخلياً
+  return auth(req, res, next);
+});
+
 // ─── SSE Endpoint ────────────────────────────────────────────────
 app.get("/api/events", (req, res) => {
+  // EventSource ما يقدر يرسل headers، فالتوكن يجي عبر query
+  try { jwt.verify(req.query.token || "", JWT_SECRET); }
+  catch { return res.status(401).end(); }
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
-  res.setHeader("Access-Control-Allow-Origin", "*");
   res.flushHeaders();
 
   // أرسل ping كل 30 ثانية للإبقاء على الاتصال
@@ -693,7 +767,7 @@ app.patch("/api/bookings/:id/confirm", async (req, res) => {
   try {
     await pool.query("UPDATE bookings SET status='confirmed' WHERE id=$1", [req.params.id]);
     res.json({ success: true });
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch(err) { res.status(500).json({ error: "حدث خطأ في الخادم" }); }
 });
 
 app.patch("/api/bookings/:id/cancel", async (req, res) => {
@@ -701,24 +775,25 @@ app.patch("/api/bookings/:id/cancel", async (req, res) => {
   res.json({ success: true });
 });
 
-// ─── حذف كل الحجوزات (للمدير فقط) ────────────────────────────────
-app.delete("/api/bookings/all", async (req, res) => {
-  const { username, password } = req.body || {};
+// ─── حذف كل الحجوزات (للمدير فقط + إعادة إدخال كلمة المرور) ───────
+app.delete("/api/bookings/all", adminOnly, async (req, res) => {
+  const { password } = req.body || {};
   try {
-    const u = await pool.query(
-      "SELECT role FROM users WHERE username=$1 AND password=$2",
-      [username, password]
-    );
-    if (u.rows.length === 0 || u.rows[0].role !== "admin") {
-      return res.status(403).json({ error: "غير مصرح — هذا الإجراء للمدير فقط" });
-    }
+    // إعادة تحقق من كلمة مرور المدير الحالي (طبقة حماية إضافية)
+    const u = await pool.query("SELECT password FROM users WHERE id=$1", [req.user.id]);
+    const stored = u.rows[0]?.password || "";
+    const okPwd = stored.startsWith("$2")
+      ? await bcrypt.compare(password || "", stored)
+      : stored === password;
+    if (!okPwd) return res.status(403).json({ error: "كلمة المرور غير صحيحة" });
+
     const result = await pool.query("DELETE FROM bookings");
-    console.log("🗑️ حُذفت كل الحجوزات بواسطة:", username);
+    console.log("🗑️ حُذفت كل الحجوزات بواسطة:", req.user.username);
     notifyClients({ type:"bookings_cleared" });
     res.json({ success: true, deleted: result.rowCount });
   } catch (err) {
     console.error("Delete all error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: "حدث خطأ في الخادم" });
   }
 });
 
@@ -735,7 +810,7 @@ app.post("/api/bookings/manual", async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error("Manual booking error:", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: "حدث خطأ في الخادم" });
   }
 });
 
@@ -948,14 +1023,14 @@ app.get("/api/reviews", async (_req, res) => {
 });
 
 // ─── API الإعدادات ───────────────────────────────────────────────
-app.get("/api/settings", async (_req, res) => {
+app.get("/api/settings", adminOnly, async (_req, res) => {
   const r = await pool.query("SELECT key, value FROM settings");
   const obj = {};
   r.rows.forEach(row => obj[row.key] = row.value);
   res.json(obj);
 });
 
-app.post("/api/settings", async (req, res) => {
+app.post("/api/settings", adminOnly, async (req, res) => {
   const entries = Object.entries(req.body);
   try {
     for (const [key, value] of entries) {
@@ -965,7 +1040,7 @@ app.post("/api/settings", async (req, res) => {
       );
     }
     res.json({ success: true });
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch(err) { res.status(500).json({ error: "حدث خطأ في الخادم" }); }
 });
 
 // ─── API الخدمات ─────────────────────────────────────────────────
@@ -983,7 +1058,7 @@ app.post("/api/services", async (req, res) => {
       [name, description||"", price||0, icon||"⭐"]
     );
     res.json(r.rows[0]);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch(err) { res.status(500).json({ error: "حدث خطأ في الخادم" }); }
 });
 
 app.patch("/api/services/:id", async (req, res) => {
@@ -994,7 +1069,7 @@ app.patch("/api/services/:id", async (req, res) => {
       [name, description||"", price||0, icon||"⭐", active!==undefined?active:true, req.params.id]
     );
     res.json(r.rows[0]);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch(err) { res.status(500).json({ error: "حدث خطأ في الخادم" }); }
 });
 
 app.delete("/api/services/:id", async (req, res) => {
@@ -1017,7 +1092,7 @@ app.post("/api/offers", async (req, res) => {
       [name, description||"", price||0, icon||"🎁", discount||0]
     );
     res.json(r.rows[0]);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch(err) { res.status(500).json({ error: "حدث خطأ في الخادم" }); }
 });
 
 app.patch("/api/offers/:id", async (req, res) => {
@@ -1028,7 +1103,7 @@ app.patch("/api/offers/:id", async (req, res) => {
       [name, description||"", price||0, icon||"🎁", discount||0, active!==undefined?active:true, req.params.id]
     );
     res.json(r.rows[0]);
-  } catch(err) { res.status(500).json({ error: err.message }); }
+  } catch(err) { res.status(500).json({ error: "حدث خطأ في الخادم" }); }
 });
 
 app.delete("/api/offers/:id", async (req, res) => {
@@ -1039,58 +1114,81 @@ app.delete("/api/offers/:id", async (req, res) => {
 // ─── API المستخدمين ──────────────────────────────────────────────
 
 // تسجيل دخول
-app.post("/api/login", async (req, res) => {
-  const { username, password } = req.body;
+app.post("/api/login", loginLimiter, async (req, res) => {
+  const { username, password } = req.body || {};
+  if (!username || !password)
+    return res.status(400).json({ error: "اسم المستخدم وكلمة المرور مطلوبين" });
   try {
     const result = await pool.query(
-      "SELECT id, username, role FROM users WHERE username=$1 AND password=$2",
-      [username, password]
+      "SELECT id, username, role, password FROM users WHERE username=$1",
+      [username]
     );
-    if (result.rows.length === 0) {
-      return res.status(401).json({ error: "اسم المستخدم أو كلمة المرور غلط" });
+    // رسالة موحّدة عشان ما نكشف هل المستخدم موجود أو لا
+    if (result.rows.length === 0)
+      return res.status(401).json({ error: "بيانات الدخول غير صحيحة" });
+
+    const u = result.rows[0];
+    let ok = false;
+    if (u.password.startsWith("$2")) {
+      ok = await bcrypt.compare(password, u.password);          // bcrypt
+    } else {
+      ok = u.password === password;                             // كلمة مرور قديمة (نص صريح)
+      if (ok) {                                                 // رقّيها لـ hash تلقائياً
+        const newHash = await bcrypt.hash(password, 10);
+        await pool.query("UPDATE users SET password=$1 WHERE id=$2", [newHash, u.id]);
+      }
     }
-    res.json(result.rows[0]);
+    if (!ok) return res.status(401).json({ error: "بيانات الدخول غير صحيحة" });
+
+    const token = jwt.sign(
+      { id: u.id, username: u.username, role: u.role },
+      JWT_SECRET, { expiresIn: "12h" }
+    );
+    res.json({ token, username: u.username, role: u.role });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("Login error:", err.message);
+    res.status(500).json({ error: "حدث خطأ في الخادم" });
   }
 });
 
 // جلب كل المستخدمين (للمدير فقط)
-app.get("/api/users", async (req, res) => {
+app.get("/api/users", adminOnly, async (req, res) => {
   try {
     const result = await pool.query(
       "SELECT id, username, role, created_at FROM users ORDER BY created_at"
     );
     res.json(result.rows);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: "حدث خطأ في الخادم" });
   }
 });
 
 // إضافة مستخدم جديد
-app.post("/api/users", async (req, res) => {
+app.post("/api/users", adminOnly, async (req, res) => {
   const { username, password, role } = req.body;
   if (!username || !password) return res.status(400).json({ error: "اسم المستخدم وكلمة المرور مطلوبين" });
   try {
+    const hash = await bcrypt.hash(password, 10);
     const result = await pool.query(
       "INSERT INTO users (username, password, role) VALUES ($1, $2, $3) RETURNING id, username, role",
-      [username, password, role || "staff"]
+      [username, hash, role || "staff"]
     );
     res.json(result.rows[0]);
   } catch (err) {
     if (err.code === "23505") return res.status(400).json({ error: "اسم المستخدم موجود مسبقاً" });
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: "حدث خطأ في الخادم" });
   }
 });
 
 // تعديل مستخدم
-app.patch("/api/users/:id", async (req, res) => {
+app.patch("/api/users/:id", adminOnly, async (req, res) => {
   const { username, password, role } = req.body;
   try {
     let query, params;
     if (password) {
+      const hash = await bcrypt.hash(password, 10);
       query = "UPDATE users SET username=$1, password=$2, role=$3 WHERE id=$4 RETURNING id, username, role";
-      params = [username, password, role, req.params.id];
+      params = [username, hash, role, req.params.id];
     } else {
       query = "UPDATE users SET username=$1, role=$2 WHERE id=$3 RETURNING id, username, role";
       params = [username, role, req.params.id];
@@ -1099,27 +1197,21 @@ app.patch("/api/users/:id", async (req, res) => {
     res.json(result.rows[0]);
   } catch (err) {
     if (err.code === "23505") return res.status(400).json({ error: "اسم المستخدم موجود مسبقاً" });
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: "حدث خطأ في الخادم" });
   }
 });
 
 // حذف مستخدم
-app.delete("/api/users/:id", async (req, res) => {
+app.delete("/api/users/:id", adminOnly, async (req, res) => {
   try {
     await pool.query("DELETE FROM users WHERE id=$1", [req.params.id]);
     res.json({ success: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: "حدث خطأ في الخادم" });
   }
 });
 
-app.get("/", (_req, res) => res.json({
-  status:   "✅ شغال",
-  provider: process.env.AI_PROVIDER,
-  model:    process.env.AI_MODEL,
-  keySet:   !!process.env.AI_API_KEY,
-  db:       !!process.env.DATABASE_URL,
-}));
+app.get("/", (_req, res) => res.json({ status: "✅ شغال" }));
 
 // ─── Start ────────────────────────────────────────────────────────
 initDB().then(() => {
