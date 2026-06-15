@@ -283,8 +283,15 @@ async function buildPrompt() {
 مثال رسالة صحيحة: "تم حجز موعدك اليوم الساعة 1:15 PM"
 مثال خاطئ: "تم حجز موعدك الساعة 1:15 ظهراً"
 
+─── قاعدة تأكيد الحجز (مهمة جداً) ───
+لا تستخدم صيغة الماضي مثل "تم حجز موعدك" أو "تم تأكيد موعدك" أو "حجزت لك" إلا في نفس الرسالة التي تضع فيها وسم [BOOKING_CONFIRMED].
+ولا تضع الوسم إلا بعد أن تجمع الأربعة كاملة: الخدمة + التاريخ + الوقت + الاسم.
+ما دام ينقصك أي معلومة، اطلب الناقص فقط ولا تقل إن الحجز تم. أمثلة:
+• ينقص الاسم: "تمام، عشان أثبّت الحجز — ممكن اسمك؟"
+• ينقص الوقت: "أي وقت يناسبك؟"
+ممنوع تعلن أن الحجز تم ثم تطلب معلومة بعده. اجمع كل شيء أولاً، وبعدها أكّد مرة واحدة مع الوسم.
+
 ─── Tags (في نهاية الرد) ───
-ما تؤكد الحجز إلا بعد: الخدمة + التاريخ + الوقت + الاسم
 [BOOKING_CONFIRMED: الاسم | الخدمة | التاريخ | الوقت AM/PM | السعر]
 [BOOKING_UPDATED: الاسم | الخدمة | التاريخ | الوقت AM/PM | السعر]
 [BOOKING_CANCELLED: التفاصيل]
@@ -433,6 +440,20 @@ async function findNextFreeSlot(date, time) {
     if (!(await isSlotTaken(date, candidate))) return candidate;
   }
   return null;
+}
+
+// هل هذا الوقت قد مضى؟ (يُطبّق فقط على حجوزات "اليوم"؛ الأيام القادمة لا تكون فائتة)
+// نحسب بتوقيت السعودية المحلي (TZ_OFFSET) مع هامش 5 دقائق حتى لا نرفض حجزاً قريباً صحيحاً.
+function isPastSlot(date, time) {
+  if (!isToday(date)) return false;                  // غير اليوم → ليس فائتاً
+  const parsed = parseTimeToHour24(time);
+  if (!parsed) return false;                         // تعذّر تحليل الوقت → لا نرفض احتياطاً
+  const tzOffset = parseInt(process.env.TZ_OFFSET || "3");
+  const nowLocal = new Date(Date.now() + tzOffset * 3600 * 1000); // الآن بالتوقيت المحلي
+  const nowMin   = nowLocal.getUTCHours() * 60 + nowLocal.getUTCMinutes();
+  const slotMin  = parsed.h * 60 + parsed.m;
+  const GRACE    = 5;                                // هامش 5 دقائق
+  return slotMin < nowMin - GRACE;
 }
 
 // ضمانة: تحوّل أي وقت بصيغة عربية (1:15 ظهراً / 4 عصراً) إلى AM/PM
@@ -644,6 +665,19 @@ ${lastMsgs}
     }
 
     if (event?.type === "booking") {
+      // رفض الأوقات الفائتة اليوم قبل أي شيء
+      if (isPastSlot(event.date, event.time)) {
+        console.log("⛔ وقت فائت (حجز):", event.date, event.time);
+        const isEn = /^[a-zA-Z]/.test(event.name || "");
+        const pastMsg = isEn
+          ? `Sorry, ${event.time} has already passed today. Would you like a later time today, or another day?`
+          : `عذراً، الوقت ${event.time} مضى اليوم. تحب وقت متأخر اليوم، أو يوم ثاني؟`;
+        messages.push({ role:"system", content:`النظام رفض الحجز: الوقت ${event.time} في الماضي (مضى اليوم). لم يتم الحجز. اطلب من العميل وقتاً قادماً اليوم أو يوماً آخر.` });
+        await saveSession(from, messages);
+        const twiml = new twilio.twiml.MessagingResponse();
+        twiml.message(pastMsg);
+        return res.type("text/xml").send(twiml.toString());
+      }
       // فحص التعارض في قاعدة البيانات قبل أي حجز
       if (await isSlotTaken(event.date, event.time)) {
         console.log("⛔ تعارض حجز:", event.date, event.time);
@@ -673,6 +707,19 @@ ${lastMsgs}
     }
 
     if (event?.type === "update") {
+      // رفض الأوقات الفائتة اليوم قبل أي شيء
+      if (isPastSlot(event.date, event.time)) {
+        console.log("⛔ وقت فائت (تعديل):", event.date, event.time);
+        const isEn = /^[a-zA-Z]/.test(event.name || "");
+        const pastMsg = isEn
+          ? `Sorry, ${event.time} has already passed today. Would you like a later time today, or another day?`
+          : `عذراً، الوقت ${event.time} مضى اليوم. تحب وقت متأخر اليوم، أو يوم ثاني؟`;
+        messages.push({ role:"system", content:`النظام رفض التعديل: الوقت ${event.time} في الماضي (مضى اليوم). لم يُعدّل الحجز. اطلب من العميل وقتاً قادماً اليوم أو يوماً آخر.` });
+        await saveSession(from, messages);
+        const twiml = new twilio.twiml.MessagingResponse();
+        twiml.message(pastMsg);
+        return res.type("text/xml").send(twiml.toString());
+      }
       // نحدث آخر حجز مؤكد لنفس الرقم
       const existing = await pool.query(
         "SELECT id FROM bookings WHERE phone=$1 AND status='confirmed' ORDER BY id DESC LIMIT 1",
